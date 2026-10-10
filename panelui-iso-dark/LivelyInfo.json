@@ -1,0 +1,14 @@
+{
+  "AppVersion": "1.0.0.0",
+  "Title": "Panel Iso Dark (PanelUI style)",
+  "Thumbnail": "preview.png",
+  "Preview": "preview.png",
+  "Desc": "panelui.dev の雰囲気を再現したアイソメ調・モノクロの壁紙（ダーク/インク版）。UI部品が静かに動きます。",
+  "Author": "PC_User",
+  "License": "",
+  "Contact": "",
+  "Type": 1,
+  "FileName": "index.html",
+  "Arguments": null,
+  "IsAbsolutePath": false
+}

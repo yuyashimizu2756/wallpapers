@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>自作ライブ壁紙ギャラリー</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #06070d; color: #d7e3f4;
+         font-family: system-ui, "Segoe UI", "Yu Gothic UI", sans-serif; }
+  header { padding: 28px 32px 8px; }
+  h1 { margin: 0 0 6px; font-size: 22px; letter-spacing: .04em; }
+  header p { margin: 0; color: #8ea3bd; font-size: 13px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+          gap: 20px; padding: 22px 32px 60px; }
+  .card { border: 1px solid #1b2740; border-radius: 14px; overflow: hidden;
+          background: #0a0e18; box-shadow: 0 8px 30px rgba(0,0,0,.45); }
+  .frame { position: relative; aspect-ratio: 16 / 9; background: #000; }
+  .frame iframe { position: absolute; inset: 0; width: 100%; height: 100%;
+                  border: 0; display: block; }
+  .meta { padding: 14px 16px; }
+  .meta h2 { margin: 0 0 4px; font-size: 15px; color: #eaf3ff; }
+  .meta p { margin: 0; font-size: 12.5px; color: #90a5c0; line-height: 1.5; }
+  .meta .path { margin-top: 8px; font: 11.5px ui-monospace, monospace; color: #5f7a99; }
+  .meta code { color: #6fd3ff; }
+</style>
+</head>
+<body>
+<header>
+  <h1>自作ライブ壁紙ギャラリー</h1>
+  <p>各カードが実際に動いています（Three.js / WebGL）。Lively Wallpaper にそのまま追加できます。</p>
+</header>
+
+<div class="grid">
+  <div class="card"><div class="frame"><iframe src="./panelui-iso/index.html" loading="lazy" title="Panel Iso"></iframe></div>
+    <div class="meta"><h2>★ Panel Iso（panelui.dev 風）</h2><p>アイソメ調・モノクロ（紙とインク）。UI部品が静かに動きます。OSのダーク/ライトに自動追従（<code>#dark</code> / <code>#light</code> で固定も可）。</p><div class="path">wallpapers\panelui-iso</div></div></div>
+
+  <div class="card"><div class="frame"><iframe src="./car-factory/index.html" loading="lazy" title="Car Factory"></iframe></div>
+    <div class="meta"><h2>① Car Factory</h2><p>ネオン工場。ベルトコンベアで車が流れ、ロボットアームが溶接、火花が散る。</p><div class="path">wallpapers\car-factory</div></div></div>
+
+  <div class="card"><div class="frame"><iframe src="./synthwave-drive/index.html" loading="lazy" title="Synthwave Drive"></iframe></div>
+    <div class="meta"><h2>② Synthwave Drive</h2><p>レトロ・シンセウェーブ。ネオンのグリッドが前方へ流れ、沈む太陽と低ポリの山。</p><div class="path">wallpapers\synthwave-drive</div></div></div>
+
+  <div class="card"><div class="frame"><iframe src="./galaxy/index.html" loading="lazy" title="Spiral Galaxy"></iframe></div>
+    <div class="meta"><h2>③ Spiral Galaxy</h2><p>5万パーティクルの渦巻き銀河。ゆっくり回転し、マウスに反応。</p><div class="path">wallpapers\galaxy</div></div></div>
+
+  <div class="card"><div class="frame"><iframe src="./neon-plexus/index.html" loading="lazy" title="Neon Plexus"></iframe></div>
+    <div class="meta"><h2>④ Neon Plexus</h2><p>漂うノードが近づくと線で結ばれるテック系。視点がマウスに追従。</p><div class="path">wallpapers\neon-plexus</div></div></div>
+
+  <div class="card"><div class="frame"><iframe src="./warp-tunnel/index.html" loading="lazy" title="Warp Tunnel"></iframe></div>
+    <div class="meta"><h2>⑤ Warp Tunnel</h2><p>ネオンのリングをくぐり抜けるワープ・トンネル。色が流れ、パーティクルが迫る。</p><div class="path">wallpapers\warp-tunnel</div></div></div>
+
+  <div class="card"><div class="frame"><iframe src="./factory-yard/index.html" loading="lazy" title="Factory Yard"></iframe></div>
+    <div class="meta"><h2>⑥ Factory Yard</h2><p>アイソメの海辺の工場町。<code>#dark</code> / <code>#light</code> で固定も可。</p><div class="path">wallpapers\factory-yard</div></div></div>
+
+  <div class="card"><div class="frame"><iframe src="./iso-harbour/index.html" loading="lazy" title="Iso Harbour"></iframe></div>
+    <div class="meta"><h2>★ Iso Harbour</h2><p>アイソメの港町。4分周期の昼夜、物流と船とカモメ。<code>#dark</code> / <code>#light</code> で固定も可。</p><div class="path">wallpapers\iso-harbour</div></div></div>
+
+  <div class="card"><div class="frame"><iframe src="./factory-yard-full/index.html?wallpaper" loading="lazy" title="Factory Yard"></iframe></div>
+    <div class="meta"><h2>★★ Factory Yard (本家)</h2><p>Khalidabdi1/factory をビルドした本家。海辺の町、Sahel の新市、農業村、観測台、Starship 打ち上げ場まで。1日=6分。</p><div class="path">wallpapers\factory-yard-full</div></div></div>
+</div>
+</body>
+</html>

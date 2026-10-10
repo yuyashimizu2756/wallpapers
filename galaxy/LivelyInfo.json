@@ -1,0 +1,14 @@
+{
+  "AppVersion": "1.0.0.0",
+  "Title": "Spiral Galaxy (Three.js)",
+  "Thumbnail": "preview.png",
+  "Preview": "preview.png",
+  "Desc": "5万個のパーティクルで描く渦巻き銀河。ゆっくり回転し、マウスに反応して視点が動きます。",
+  "Author": "PC_User",
+  "License": "",
+  "Contact": "",
+  "Type": 1,
+  "FileName": "index.html",
+  "Arguments": null,
+  "IsAbsolutePath": false
+}

@@ -1,0 +1,14 @@
+{
+  "AppVersion": "1.0.0.0",
+  "Title": "Synthwave Drive (Three.js)",
+  "Thumbnail": "preview.png",
+  "Preview": "preview.png",
+  "Desc": "レトロ・シンセウェーブ。ネオンのグリッドが前方へ流れ、低ポリの山と沈む太陽。",
+  "Author": "PC_User",
+  "License": "",
+  "Contact": "",
+  "Type": 1,
+  "FileName": "index.html",
+  "Arguments": null,
+  "IsAbsolutePath": false
+}

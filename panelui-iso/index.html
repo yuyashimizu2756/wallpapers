@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Panel Iso — Lively Wallpaper</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #f5f5f3; }
+  @media (prefers-color-scheme: dark) { html, body { background: #161616; } }
+  #app { position: fixed; inset: 0; }
+  #app canvas { display: block; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script src="lib/three.min.js"></script>
+<script>
+/* =========================================================================
+   Panel Iso — isometric, monochrome, paper & ink (PanelUI-inspired)
+   ========================================================================= */
+/* Theme: follow the OS (prefers-color-scheme). Force with #dark or #light. */
+const _q = location.search + location.hash;
+const _forced = /dark/i.test(_q) ? true : (/light/i.test(_q) ? false : null);
+const _mq = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+const DARK = _forced !== null ? _forced : !!(_mq && _mq.matches);
+if (_forced === null && _mq) {
+  const onThemeChange = () => location.reload();   // re-init on OS theme switch
+  if (_mq.addEventListener) _mq.addEventListener('change', onThemeChange);
+  else if (_mq.addListener) _mq.addListener(onThemeChange);
+}
+
+const P = DARK ? {
+  bg: 0x161616, face: 0x1f1f1f, faceAlt: 0x1a1a1a, ink: 0xf5f5f5,
+  edge: 0x4a4a4a, grid: 0x262626, shadow: 'rgba(0,0,0,0.5)',
+  label: '#f5f5f5', bars: [0x2e2e2e, 0x3d3d3d, 0x5c5c5c, 0x8a8a8a, 0xc2c2c2]
+} : {
+  bg: 0xf5f5f3, face: 0xffffff, faceAlt: 0xf0f0ee, ink: 0x262626,
+  edge: 0xb0b0ac, grid: 0xe4e4e1, shadow: 'rgba(20,20,20,0.35)',
+  label: '#262626', bars: [0xdedede, 0xc4c4c1, 0x909090, 0x5c5c5c, 0x2f2f2f]
+};
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(P.bg);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.getElementById('app').appendChild(renderer.domElement);
+
+// ---- isometric orthographic camera
+const VIEW = 8.6;
+const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 200);
+function fitCamera() {
+  const aspect = innerWidth / innerHeight;
+  camera.left = -VIEW * aspect;
+  camera.right = VIEW * aspect;
+  camera.top = VIEW;
+  camera.bottom = -VIEW;
+  camera.position.set(16, 16, 16);
+  camera.lookAt(0, 0.4, 0);
+  camera.updateProjectionMatrix();
+}
+fitCamera();
+
+// ---- lights (soft top-lit matte => automatic isometric face shading)
+scene.add(new THREE.HemisphereLight(0xffffff, DARK ? 0x111111 : 0xcfcfcc, DARK ? 0.55 : 0.95));
+const key = new THREE.DirectionalLight(0xffffff, DARK ? 0.9 : 1.05);
+key.position.set(7, 15, 9);
+scene.add(key);
+const fill = new THREE.DirectionalLight(DARK ? 0x8899bb : 0xffffff, DARK ? 0.35 : 0.28);
+fill.position.set(-9, 7, -7);
+scene.add(fill);
+
+const world = new THREE.Group();
+scene.add(world);
+
+const edgeMat = new THREE.LineBasicMaterial({ color: P.edge });
+const matte = (c) => new THREE.MeshStandardMaterial({ color: c, roughness: 0.95, metalness: 0.0 });
+
+// ---- helpers -------------------------------------------------------------
+function box(w, h, d, color, mat) {
+  const g = new THREE.Group();
+  const geo = new THREE.BoxGeometry(w, h, d);
+  const m = new THREE.Mesh(geo, mat || matte(color));
+  g.add(m);
+  g.add(new THREE.LineSegments(new THREE.EdgesGeometry(geo), mat ? new THREE.LineBasicMaterial({ color: P.edge, transparent: true, opacity: 0.55 }) : edgeMat));
+  g.userData = { w, h, d };
+  return g;
+}
+function cyl(r, h, color) {
+  const g = new THREE.Group();
+  const geo = new THREE.CylinderGeometry(r, r, h, 40);
+  g.add(new THREE.Mesh(geo, matte(color)));
+  g.add(new THREE.LineSegments(new THREE.EdgesGeometry(geo), edgeMat));
+  return g;
+}
+function labelMesh(text, size) {
+  const font = '500 46px "Geist Mono","Cascadia Mono",Consolas,ui-monospace,monospace';
+  const c = document.createElement('canvas');
+  const g0 = c.getContext('2d');
+  g0.font = font;
+  const w = Math.ceil(g0.measureText(text).width) + 40;
+  const h = 72;
+  c.width = w; c.height = h;
+  const g = c.getContext('2d');
+  g.font = font; g.fillStyle = P.label; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillText(text, w / 2, h / 2 + 2);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
+  const aspect = w / h;
+  const m = new THREE.Mesh(
+    new THREE.PlaneGeometry(size * aspect, size),
+    new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false })
+  );
+  m.rotation.x = -Math.PI / 2;
+  return m;
+}
+const shadowTex = (() => {
+  const c = document.createElement('canvas'); c.width = c.height = 128;
+  const g = c.getContext('2d');
+  const grd = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+  grd.addColorStop(0, P.shadow); grd.addColorStop(0.55, P.shadow.replace(/[\d.]+\)$/, '0.12)')); grd.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = grd; g.fillRect(0, 0, 128, 128);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+})();
+function blob(w, d) {
+  const m = new THREE.Mesh(
+    new THREE.PlaneGeometry(w, d),
+    new THREE.MeshBasicMaterial({ map: shadowTex, transparent: true, depthWrite: false })
+  );
+  m.rotation.x = -Math.PI / 2;
+  m.position.y = 0.012;
+  return m;
+}
+
+// ---- board ---------------------------------------------------------------
+const BOARD = 13;
+const board = box(BOARD, 0.7, BOARD, P.face);
+board.position.y = -0.35;
+world.add(board);
+
+// faint graph grid on the board top
+(function grid() {
+  const pts = [];
+  const half = BOARD / 2 - 0.7;
+  for (let i = -6; i <= 6; i++) {
+    pts.push(i, 0, -half, i, 0, half);
+    pts.push(-half, 0, i, half, 0, i);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pts), 3));
+  const lines = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: P.grid }));
+  lines.position.y = 0.011;
+  world.add(lines);
+})();
+
+// ---- components on the board --------------------------------------------
+// (1) primary button
+const btn = box(3.0, 0.8, 1.4, P.ink);
+btn.position.set(-4.2, 0.4, 3.4);
+world.add(btn);
+const btnLabel = labelMesh('Button', 0.62);
+btnLabel.position.set(-4.2, 0.83, 3.4);
+world.add(btnLabel);
+
+// (2) switch
+const swBase = box(2.4, 0.55, 1.2, P.faceAlt);
+swBase.position.set(1.2, 0.275, 4.0);
+world.add(swBase);
+const swKnob = box(0.95, 0.95, 0.95, P.ink);
+swKnob.position.set(1.2, 0.62, 4.0);
+world.add(swKnob);
+const swLabel = labelMesh('Switch', 0.55);
+swLabel.position.set(1.2, 0.52, 5.0);
+world.add(swLabel);
+
+// (3) slider
+const track = box(4.4, 0.35, 0.7, P.faceAlt);
+track.position.set(-1.0, 0.18, 1.6);
+world.add(track);
+const knob = box(0.8, 0.7, 1.0, P.ink);
+knob.position.set(-1.0, 0.42, 1.6);
+world.add(knob);
+const slLabel = labelMesh('Slider', 0.55);
+slLabel.position.set(-1.0, 0.45, 2.6);
+world.add(slLabel);
+
+// (4) animated bar chart on a card
+const chartPanel = box(3.6, 0.4, 3.4, P.face);
+chartPanel.position.set(-4.0, 0.2, -2.4);
+world.add(chartPanel);
+const bars = [];
+const ramp = P.bars;
+for (let i = 0; i < 5; i++) {
+  const b = box(0.5, 1, 0.5, ramp[i]);
+  b.position.set(-5.4 + i * 0.7, 0.4 + 0.5, -2.4 - 1.1 + i * 0.55);
+  world.add(b);
+  bars.push(b);
+}
+const chLabel = labelMesh('Chart', 0.55);
+chLabel.position.set(-4.0, 0.44, -0.6);
+world.add(chLabel);
+
+// (5) stacked cards
+const cardA = box(2.8, 0.35, 2.0, P.face);
+cardA.position.set(3.6, 0.18, -3.6);
+world.add(cardA);
+const cardB = box(2.4, 0.35, 1.7, P.faceAlt);
+cardB.position.set(3.9, 0.55, -3.3);
+world.add(cardB);
+const cardC = box(2.0, 0.35, 1.4, P.face);
+cardC.position.set(4.15, 0.92, -3.05);
+world.add(cardC);
+const cardLabel = labelMesh('Card', 0.55);
+cardLabel.position.set(3.6, 0.5, -1.9);
+world.add(cardLabel);
+
+// (6) floating dialog that bobs
+const dialog = new THREE.Group();
+const dlgBody = box(3.2, 2.2, 0.35, P.face);   // vertical panel (tall in y, thin in z)
+dialog.add(dlgBody);
+world.add(dialog);
+dialog.position.set(4.6, 3.4, 1.2);
+const dlgLabel = labelMesh('Dialog', 0.5);
+world.add(dlgLabel);
+const dlgBlob = blob(3.6, 3.2);
+dlgBlob.position.set(4.6, 0.02, 1.2);
+world.add(dlgBlob);
+
+// (7) small scatter blocks
+const cubes = [];
+for (let i = 0; i < 4; i++) {
+  const s = 0.7 + Math.random() * 0.5;
+  const c = box(s, s, s, i % 2 ? P.faceAlt : P.face);
+  c.position.set(-2.5 + i * 1.3, 0.4, -5.4 + (i % 2) * 0.9);
+  world.add(c);
+  cubes.push({ g: c, y0: 0.4, phase: Math.random() * Math.PI * 2 });
+}
+
+// (8) cursor puck that travels the board
+const puck = cyl(0.42, 0.16, P.ink);
+world.add(puck);
+const puckRing = new THREE.Mesh(
+  new THREE.RingGeometry(0.55, 0.62, 40),
+  new THREE.MeshBasicMaterial({ color: P.ink, transparent: true, opacity: 0.35, side: THREE.DoubleSide, depthWrite: false })
+);
+puckRing.rotation.x = -Math.PI / 2;
+puckRing.position.y = 0.014;
+world.add(puckRing);
+
+// ---- pointer parallax ----------------------------------------------------
+const pointer = { x: 0, y: 0 }, target = { x: 0, y: 0 };
+addEventListener('pointermove', (e) => {
+  target.x = (e.clientX / innerWidth) * 2 - 1;
+  target.y = (e.clientY / innerHeight) * 2 - 1;
+});
+
+// ---- resize --------------------------------------------------------------
+addEventListener('resize', () => {
+  renderer.setSize(innerWidth, innerHeight);
+  fitCamera();
+});
+
+// ---- animate -------------------------------------------------------------
+const clock = new THREE.Clock();
+const R = 4.6; // puck path radius
+
+function animate() {
+  const t = clock.elapsedTime;
+  const dt = Math.min(clock.getDelta(), 0.05);
+
+  // bars breathe
+  bars.forEach((b, i) => {
+    const hgt = 1.2 + Math.sin(t * 1.1 + i * 0.7) * 0.7 + (i + 1) * 0.35;
+    b.scale.y = hgt;
+    b.position.y = 0.4 + 0.5 * hgt;   // bottom stays on the chart card
+  });
+
+  // slider knob slides
+  knob.position.x = -1.0 + Math.sin(t * 0.8) * 1.5;
+
+  // switch flips
+  const flip = (Math.sin(t * 0.9) > 0) ? 1 : -1;
+  swKnob.position.x += ((1.2 + flip * 0.55) - swKnob.position.x) * Math.min(1, dt * 8);
+
+  // dialog bobs and gently inclines
+  dialog.position.y = 3.4 + Math.sin(t * 0.7) * 0.35;
+  dialog.rotation.z = Math.sin(t * 0.5) * 0.03;
+  dialog.rotation.y = Math.sin(t * 0.4) * 0.06;
+  dlgLabel.position.set(dialog.position.x, dialog.position.y - 1.35, dialog.position.z + 0.25);
+  dlgBlob.scale.setScalar(0.85 + Math.sin(t * 0.7) * 0.08);
+  dlgBlob.material.opacity = 0.9 - (dialog.position.y - 3.4) * 0.4;
+
+  // scatter cubes bob
+  cubes.forEach((c) => {
+    c.g.position.y = c.y0 + Math.abs(Math.sin(t * 0.8 + c.phase)) * 0.25;
+  });
+
+  // cursor puck loops around the board with easing + ring pulse
+  const u = (t * 0.06) % 1;
+  const ang = u * Math.PI * 2;
+  const px = Math.cos(ang) * R + Math.sin(ang * 2) * 0.6;
+  const pz = Math.sin(ang) * R + Math.cos(ang * 3) * 0.6;
+  puck.position.set(px, 0.38 + Math.sin(t * 2) * 0.03, pz);
+  puckRing.position.set(px, 0.014, pz);
+  const pulse = 1 + (Math.sin(t * 2) * 0.5 + 0.5) * 0.5;
+  puckRing.scale.setScalar(pulse);
+  puckRing.material.opacity = 0.35 * (2 - pulse);
+
+  // slow isometric sway + parallax
+  world.rotation.y = Math.sin(t * 0.06) * 0.10;
+  pointer.x += (target.x - pointer.x) * 0.04;
+  pointer.y += (target.y - pointer.y) * 0.04;
+  camera.position.set(16 + pointer.x * 2.4, 16 - pointer.y * 1.6, 16 + pointer.x * 1.2);
+  camera.lookAt(0, 0.4, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(animate);
+}
+animate();
+</script>
+</body>
+</html>

@@ -1,0 +1,14 @@
+{
+  "AppVersion": "1.0.0.0",
+  "Title": "Factory Yard",
+  "Thumbnail": "preview.png",
+  "Preview": "preview.png",
+  "Desc": "アイソメの海辺の工場町。ヘアライン風の線で描いた工場・倉庫・港が、５分周期の昼夜（夜は窓明かり・灯台が灯る）で暮れていきます。クリックで＋６時間スキップ。OSのダーク/ライトに自動追従します。",
+  "Author": "PC_User",
+  "License": "",
+  "Contact": "",
+  "Type": 1,
+  "FileName": "index.html",
+  "Arguments": null,
+  "IsAbsolutePath": false
+}

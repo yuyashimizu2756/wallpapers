@@ -1,0 +1,1085 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Iso Harbour — Lively Wallpaper</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0c0d0e; }
+  #app { position: fixed; inset: 0; }
+  #app canvas { display: block; }
+  #cap {
+    position: fixed; left: 18px; bottom: 16px;
+    font: 12px/1.4 ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    letter-spacing: .16em; text-transform: uppercase; color: #868b8f;
+    pointer-events: none; user-select: none; white-space: pre;
+  }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="cap"></div>
+<script src="lib/three.min.js"></script>
+<script>
+/* ============================================================================
+   ISO HARBOUR — a small live isometric harbour town, as a Windows/Lively wallpaper.
+   UMD three.js (r160) · runs straight off file:// · no network access.
+
+   Visual language + iso kernel concept after:
+     · https://github.com/Khalidabdi1/factory   (MIT)
+     · https://github.com/MrBongoC/ai-iso-skill (MIT © Tolga Cohce)
+       - orthographic camera looking down (1,1,1)  ->  iso projection
+       - flat unlit faces, every edge a 1px "hairline"
+       - one live accent colour, reserved for whatever is moving or lit
+       - colour tokens slide from a day theme into ONE night palette after dusk
+
+   What moves: pallets creep along the plant conveyor, a forklift shuttles them
+   to the bays, a flatbed runs the road to the warehouse, a van takes parcels
+   to the corner shop, a freight train crosses the siding, a boat works the bay
+   and gulls circle over it.  One in-world day = 4 real minutes.
+
+   Debug: append #dark / #light to the URL to pin the theme.
+   ============================================================================ */
+'use strict';
+
+/* ---- theme: follow the OS, pinned with #dark / #light ---- */
+const _forced = /dark/i.test(location.hash) ? true : (/light/i.test(location.hash) ? false : null);
+const _mq = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+let DARK = _forced !== null ? _forced : !!(_mq && _mq.matches);
+const REDUCED = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+const TAU = Math.PI * 2;
+const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+const lerp = (a, b, t) => a + (b - a) * t;
+const ease = (v) => v * v * (3 - 2 * v);
+const smooth = (v) => { v = clamp(v, 0, 1); return v * v * (3 - 2 * v); };
+function rng(seed) { let s = seed >>> 0; return () => (s = (s * 1664525 + 1013904223) >>> 0) / 4294967296; }
+const rand = rng(20261010);
+
+/* ---- palettes ----
+   DAY is rebuilt whenever the OS theme flips, so the tokens stay honest. */
+let DAY, Cbg, CpageN, CinkDay;
+function dayPalette() {
+  return DARK ? {
+    bg: '#0c0d0e', pageN: '#0a0b0b',
+    line: '#3d4144', detail: '#2b2e30',
+    body: '#17181a', deck: '#1b1d1f', ground: '#161719', road: '#111213',
+    ko: '#d9dcde', koDeck: '#e9ebec', koLine: '#5a5f63',
+    glass: '#0b0c0c', steel: '#6a6f73',
+    live: '#f4f5f5', sea: '#0f1112', sand: '#1c1d1f',
+    grass: '#141517', snow: '#303336', ink: '#868b8f',
+  } : {
+    bg: '#e7e8e7', pageN: '#0c0d0e',
+    line: '#7b8085', detail: '#b4b8bb',
+    body: '#fdfdfc', deck: '#ffffff', ground: '#e2e3e1', road: '#d3d5d4',
+    ko: '#1c1e20', koDeck: '#33363a', koLine: '#0c0d0e',
+    glass: '#eceeee', steel: '#8d9397',
+    live: '#0c0d0e', sea: '#c3cbcf', sand: '#eeeDE6',
+    grass: '#dcdfd9', snow: '#fbfbfa', ink: '#585d61',
+  };
+}
+/* after dusk everything falls toward this single set */
+const NIGHT = {
+  ground: '#15171a', road: '#0e1012', body: '#1e2124', deck: '#272b2e',
+  glass: '#0b0c0d', live: '#f4f5f5', window: '#e9ebec', lamp: '#f4f5f5',
+  sea: '#0c0e10', sand: '#1a1c1f', grass: '#131517', snow: '#33373b',
+  line: '#565c61', detail: '#343a3e',
+  ko: '#9aa0a5', koDeck: '#a8aeb2', koLine: '#5e6469', steel: '#666d72',
+  ink: '#8d9398',
+};
+/* fill family -> [day token, night token] */
+const FILLMAP = {
+  ground: ['ground', 'ground'], road: ['road', 'road'], body: ['body', 'body'],
+  deck: ['deck', 'deck'], glass: ['glass', 'glass'],
+  ko: ['ko', 'ko'], koDeck: ['koDeck', 'koDeck'], steel: ['steel', 'steel'],
+  sea: ['sea', 'sea'], sand: ['sand', 'sand'], grass: ['grass', 'grass'],
+  snow: ['snow', 'snow'],
+  window: ['glass', 'window'],   /* glazing by day, lit after dusk */
+  lamp: ['deck', 'lamp'],        /* the fitting, lit after dusk    */
+  live: ['live', 'live'],        /* the single accent colour       */
+};
+/* line family -> [day token, night token] */
+const LINEMAP = { line: 'line', detail: 'detail', koLine: 'koLine', live: 'live' };
+/* these light early, so they lead the transition */
+const LIT = new Set(['window', 'lamp', 'live']);
+
+/* ---- three ---- */
+const canvas = document.createElement('canvas');
+document.getElementById('app').appendChild(canvas);
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+const scene = new THREE.Scene();
+const capEl = document.getElementById('cap');
+
+/* ---- the iso kernel ----
+   Skill coords: +x east (down-right on screen), +y south (down-left), +z up.
+   W() swaps y and z into three.js y-up world space.
+
+   TOP(x,y,z)   horizontal plane, +u = +x, +v = +y (reads upright on the ground)
+   FRONT(x,y,z) vertical plane AT y, facing -y; +u = +x, +v = DOWN from z
+   SIDE(x,y,z)  vertical plane AT x, facing -x; +u = -y, +v = DOWN from z
+   Materials are DoubleSide, so a facade reads from either side.            */
+const W = (x, y, z = 0) => new THREE.Vector3(x, z, y);
+const v3 = (x, y, z) => new THREE.Vector3(x, y, z);
+function planeAt(o, u, v) {
+  const O = W(o[0], o[1], o[2]);
+  const U = W(u[0], u[1], u[2]);
+  const V = W(v[0], v[1], v[2]);
+  const n = new THREE.Vector3().crossVectors(U, V).normalize();
+  return new THREE.Matrix4().makeBasis(U, V, n).setPosition(O);
+}
+const TOP = (x, y, z) => planeAt([x, y, z], [1, 0, 0], [0, 1, 0]);
+const FRONT = (x, y, z) => planeAt([x, y, z], [1, 0, 0], [0, 0, -1]);
+const SIDE = (x, y, z) => planeAt([x, y, z], [0, -1, 0], [0, 0, -1]);
+const M_T = TOP(0, 0, 0);
+const mcol = (m) => new THREE.Vector3().setFromMatrixColumn(m, 2).normalize();
+
+/* ---- camera: orthographic, looking down (1,1,1) ---- */
+const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 400, 6400);
+const ISO = v3(1, 1, 1).normalize();
+const CAM_DIST = 3400;
+/* the frame is the district we actually built: shop + plant + warehouse,
+   quay in front, sea and far shore behind.  */
+const FRAME = { x0: -6, x1: 300, y0: -20, y1: 350, z0: -4, z1: 30 };
+let fit = null;
+
+function computeFit(w, h) {
+  const target = W((FRAME.x0 + FRAME.x1) / 2, (FRAME.y0 + FRAME.y1) / 2, 0);
+  camera.position.copy(target).addScaledVector(ISO, CAM_DIST);
+  camera.lookAt(target);
+  camera.updateMatrixWorld(true);
+  let minx = 1e9, maxx = -1e9, miny = 1e9, maxy = -1e9;
+  for (const x of [FRAME.x0, FRAME.x1]) for (const y of [FRAME.y0, FRAME.y1])
+    for (const z of [FRAME.z0, FRAME.z1]) {
+      const q = W(x, y, z).applyMatrix4(camera.matrixWorldInverse);
+      if (q.x < minx) minx = q.x; if (q.x > maxx) maxx = q.x;
+      if (q.y < miny) miny = q.y; if (q.y > maxy) maxy = q.y;
+    }
+  const zoom = Math.min(w / (maxx - minx), h / (maxy - miny)) * 0.94;
+  const cx = (minx + maxx) / 2, cy = (miny + maxy) / 2;
+  const e = camera.matrixWorldInverse.elements;
+  target.addScaledVector(v3(e[0], e[1], e[2]), -cx).addScaledVector(v3(e[4], e[5], e[6]), -cy);
+  return { zoom, target: target.clone() };
+}
+function applyCamera(target, zoom) {
+  camera.position.copy(target).addScaledVector(ISO, CAM_DIST);
+  camera.lookAt(target);
+  camera.zoom = zoom;
+  camera.updateProjectionMatrix();
+}
+function resize() {
+  const w = window.innerWidth, h = window.innerHeight;
+  renderer.setSize(w, h);
+  camera.left = -w / 2; camera.right = w / 2;
+  camera.top = h / 2; camera.bottom = -h / 2;
+  fit = computeFit(w, h);
+  applyCamera(fit.target, fit.zoom);
+}
+window.addEventListener('resize', resize);
+
+/* ---- materials + the day -> night palette hop ---- */
+const FILLM = {}, LINEM = {}, INKM = [], Cday = {}, Cnight = {};
+function buildMaterials() {
+  for (const k in FILLMAP) {
+    FILLM[k] = FILLM[k] || new THREE.MeshBasicMaterial({
+      color: 0xffffff, side: THREE.DoubleSide,
+      polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1,
+    });
+  }
+  for (const k in LINEMAP) {
+    LINEM[k] = LINEM[k] || new THREE.LineBasicMaterial({
+      color: 0xffffff,
+      polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
+    });
+  }
+}
+function rebuildPalette() {
+  DAY = dayPalette();
+  for (const k in FILLMAP) {
+    Cday[k] = new THREE.Color(DAY[FILLMAP[k][0]]);
+    Cnight[k] = new THREE.Color(NIGHT[FILLMAP[k][1]]);
+  }
+  for (const k in LINEMAP) {
+    Cday['L' + k] = new THREE.Color(DAY[LINEMAP[k]]);
+    Cnight['L' + k] = new THREE.Color(NIGHT[LINEMAP[k]]);
+  }
+  Cday.ink = new THREE.Color(DAY.ink); Cnight.ink = new THREE.Color(NIGHT.ink);
+  Cbg = new THREE.Color(DAY.bg); CpageN = new THREE.Color(DAY.pageN);
+  scene.background = Cbg.clone();
+}
+buildMaterials();
+rebuildPalette();
+if (_mq && _mq.addEventListener) {
+  _mq.addEventListener('change', (e) => {
+    if (_forced !== null) return;
+    DARK = e.matches; rebuildPalette();
+  });
+}
+function shade(n) {
+  for (const k in FILLMAP) {
+    const f = LIT.has(k) ? Math.min(1, n * 1.9) : n;
+    FILLM[k].color.copy(Cday[k]).lerp(Cnight[k], f);
+  }
+  for (const k in LINEMAP) {
+    const f = (k === 'live') ? Math.min(1, n * 1.9) : n;
+    LINEM[k].color.copy(Cday['L' + k]).lerp(Cnight['L' + k], f);
+  }
+  for (const m of INKM) m.color.copy(Cday.ink).lerp(Cnight.ink, n);
+  scene.background.copy(Cbg).lerp(CpageN, n);
+  capEl.style.color = '#' + new THREE.Color(DAY.ink).lerp(new THREE.Color(NIGHT.ink), n).getHexString();
+}
+
+/* ---- part builder ---- */
+const TONE = {
+  n:  ['body', 'deck', 'line'],        /* plain shed                */
+  k:  ['ko', 'koDeck', 'koLine'],     /* knocked-back accent mass  */
+  g:  ['glass', 'glass', 'line'],     /* glazing                   */
+  w:  ['window', 'window', 'line'],   /* lit windows               */
+  l:  ['lamp', 'lamp', 'line'],       /* lamps, beacons, headlights*/
+  s:  ['body', 'sand', 'line'],       /* standing on sand          */
+  st: ['steel', 'steel', 'line'],     /* steel                     */
+  b:  ['body', 'body', 'line'],       /* neutral mass              */
+  gr: ['body', 'grass', 'line'],      /* grass ground              */
+  gs: ['body', 'grass', 'line'],      /* shrub-covered ground      */
+};
+function faceTone(t) { const a = TONE[t]; return { flood: a[0], deck: a[1], line: a[2] }; }
+
+class Part {
+  constructor() { this.fill = {}; this.line = []; this.texts = []; }
+
+  tri(k, a, b, c) {
+    (this.fill[k] || (this.fill[k] = [])).push(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z);
+    return this;
+  }
+  poly(k, pts) {
+    for (let i = 0; i < pts.length - 2; i++) this.tri(k, pts[0], pts[i + 1], pts[i + 2]);
+    return this;
+  }
+  seg(k, a, b) { this.line.push(k, a.x, a.y, a.z, b.x, b.y, b.z); return this; }
+
+  /* segments in a plane's own (u,v), placed by matrix m */
+  draw(m, segs, lift = .05) {
+    if (segs.length < 2) return this;
+    const off = mcol(m).multiplyScalar(lift);
+    const A = new THREE.Vector3(), B = new THREE.Vector3();
+    for (let i = 0; i < segs.length - 2; i += 2) {
+      A.set(segs[i], segs[i + 1], 0).applyMatrix4(m).add(off);
+      B.set(segs[i + 2], segs[i + 3], 0).applyMatrix4(m).add(off);
+      this.seg('line', A, B);
+    }
+    return this;
+  }
+  loop(m, segs, lift = .05) {
+    if (segs.length < 4) return this;
+    return this.draw(m, segs.concat(segs[0], segs[1]), lift);
+  }
+  rect(m, x, y, w, h, lift = .05) { return this.loop(m, [x, y, x + w, y, x + w, y + h, x, y + h], lift); }
+  /* filled rectangle in plane (u,v) */
+  fill2(m, x, y, w, h, k = 'glass', lift = .03) {
+    const off = mcol(m).multiplyScalar(lift);
+    const q = [[x, y], [x + w, y], [x + w, y + h], [x, y + h]]
+      .map(([u, v]) => new THREE.Vector3(u, v, 0).applyMatrix4(m).add(off));
+    this.poly(k, q); return this;
+  }
+  poly2(m, pts, k, lift = .03) {
+    const off = mcol(m).multiplyScalar(lift);
+    this.poly(k, pts.map(([u, v]) => new THREE.Vector3(u, v, 0).applyMatrix4(m).add(off)));
+    return this;
+  }
+  /* a flat horizontal slab from a plan rectangle */
+  slab(x, y, w, d, z, k = 'road', lift = .02) {
+    return this.fill2(TOP(x, y, z), 0, 0, w, d, k, lift);
+  }
+  /* visible side of a closed shape: deck on top, flood elsewhere */
+  face(pts, flood, deck) {
+    const n = polyNormal(pts);
+    if (n.y > .55) this.poly(deck, pts);
+    else if (n.y > -.82) this.poly(flood, pts);
+  }
+  /* extrude a plan polygon [[x,y,z],...] by e=[dx,dy,dz] */
+  ext(poly, e, tone = 'n') {
+    if (poly.length < 3) return this;
+    const { flood, deck, line: lc } = faceTone(tone);
+    const A = poly.map((q) => W(q[0], q[1], q[2]));
+    const D = v3(e[0], e[2], e[1]);
+    const B = A.map((a) => a.clone().add(D));
+    this.face(A, flood, deck); this.face(B, flood, deck);
+    for (let i = 0; i < A.length; i++) {
+      const j = (i + 1) % A.length;
+      this.face([A[i], A[j], B[j], B[i]], flood, deck);
+      this.seg(lc, A[i], A[j]);
+      this.seg(lc, B[i], B[j]);
+      this.seg(lc, A[i], B[i]);
+    }
+    return this;
+  }
+  /* box; z is the base, w along x, d along y, h up */
+  box(x, y, z, w, d, h, tone = 'n') {
+    const { flood, deck, line: lc } = faceTone(tone);
+    const x0 = x - w / 2, x1 = x + w / 2, y0 = y - d / 2, y1 = y + d / 2, z1 = z + h;
+    const c = [
+      [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1],
+      [x0, y0, z], [x1, y0, z], [x1, y1, z], [x0, y1, z],
+    ].map((q) => W(q[0], q[1], q[2]));
+    this.poly(deck, [c[0], c[1], c[2], c[3]]);
+    this.poly(flood, [c[0], c[1], c[5], c[4]]);
+    this.poly(flood, [c[1], c[2], c[6], c[5]]);
+    this.poly(flood, [c[2], c[3], c[7], c[6]]);
+    this.poly(flood, [c[3], c[0], c[4], c[7]]);
+    for (let i = 0; i < 4; i++) {
+      const j = (i + 1) % 4;
+      this.seg(lc, c[i], c[j]);
+      this.seg(lc, c[i + 4], c[j + 4]);
+      this.seg(lc, c[i], c[i + 4]);
+    }
+    return this;
+  }
+  /* vertical cylinder, r/h, based at z */
+  cylZ(x, y, z, r, h, segs = 12, tone = 'n') {
+    const { flood, line: lc } = faceTone(tone);
+    const P = (a, zz) => W(x + Math.cos(a) * r, y + Math.sin(a) * r, z + zz);
+    for (let i = 0; i < segs; i++) {
+      const a = (i / segs) * TAU, b = ((i + 1) / segs) * TAU;
+      this.poly(flood, [P(a, 0), P(b, 0), P(b, h), P(a, h)]);
+      this.seg(lc, P(a, 0), P(b, 0));
+      this.seg(lc, P(a, h), P(b, h));
+    }
+    return this;
+  }
+  /* a wheel: cylinder lying along y */
+  wheel(x, y, z, r, w = .55) {
+    const P = (a, s) => W(x + Math.cos(a) * r, y + s, z + Math.sin(a) * r);
+    const segs = 10;
+    for (let i = 0; i < segs; i++) {
+      const a = (i / segs) * TAU, b = ((i + 1) / segs) * TAU;
+      this.poly('b', [P(a, -w / 2), P(b, -w / 2), P(b, w / 2), P(a, w / 2)]);
+      this.seg('line', P(a, -w / 2), P(b, -w / 2));
+    }
+    return this;
+  }
+  /* window band on a facade: FRONT/SIDE at (x,y,zTop); +v runs DOWN from zTop */
+  band(m, u, w, zTop, h, k = 'w', lift = .05) {
+    return this.fill2(m, u, 0, w, h, k, lift);
+  }
+  /* text on plane m at (u,v), px = texture px per metre */
+  text(m, s, u, v, px = 1.4, lift = .07, flip = false) {
+    const TP = 64;
+    const cv = document.createElement('canvas');
+    const cx = cv.getContext('2d');
+    const font = '500 44px ui-monospace, "SF Mono", Menlo, Consolas, monospace';
+    cx.font = font;
+    cv.width = Math.ceil(cx.measureText(s).width) + 12;
+    cv.height = TP;
+    cx.font = font; cx.fillStyle = '#ffffff'; cx.textBaseline = 'middle';
+    cx.fillText(s, 6, TP / 2 + 1);
+    const tex = new THREE.CanvasTexture(cv);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    const mat = new THREE.MeshBasicMaterial({
+      map: tex, transparent: true, depthWrite: false, color: new THREE.Color(DAY.ink),
+    });
+    const g = new THREE.PlaneGeometry(px * cv.width / TP, px);
+    if (flip) g.rotateX(Math.PI);
+    const off = mcol(m).multiplyScalar(lift);
+    g.applyMatrix4(m); g.translate(off.x, off.y, off.z);
+    const mesh = new THREE.Mesh(g, mat);
+    mesh.renderOrder = 4;
+    INKM.push(mat); this.texts.push(mesh);
+    return this;
+  }
+
+  build(name) {
+    const g = new THREE.Group(); g.name = name;
+    for (const k in this.fill) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(this.fill[k], 3));
+      g.add(new THREE.Mesh(geo, FILLM[k]));
+    }
+    if (this.line.length) {
+      /* group the hairline segments by family so each gets its own material */
+      const byKey = {};
+      for (let i = 0; i < this.line.length; i += 7) {
+        const k = this.line[i];
+        (byKey[k] || (byKey[k] = [])).push(
+          this.line[i + 1], this.line[i + 2], this.line[i + 3],
+          this.line[i + 4], this.line[i + 5], this.line[i + 6]);
+      }
+      for (const k in byKey) {
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.Float32BufferAttribute(byKey[k], 3));
+        const l = new THREE.LineSegments(geo, LINEM[k] || LINEM.line);
+        l.renderOrder = 2;
+        g.add(l);
+      }
+    }
+    for (const t of this.texts) g.add(t);
+    return g;
+  }
+}
+function polyNormal(pts) {
+  const n = new THREE.Vector3();
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i], b = pts[(i + 1) % pts.length];
+    n.x += (a.y - b.y) * (a.z + b.z);
+    n.y += (a.z - b.z) * (a.x + b.x);
+    n.z += (a.x - b.x) * (a.y + b.y);
+  }
+  return n.normalize();
+}
+/* put a THREE primitive into a Part, with hairlines on its edges */
+function geoToPart(p, geo, m, fill = 'grass', line = 'detail') {
+  const g = geo.index ? geo.toNonIndexed() : geo;
+  const pos = g.getAttribute('position');
+  const v0 = new THREE.Vector3(), v1 = new THREE.Vector3(), v2 = new THREE.Vector3();
+  for (let i = 0; i < pos.count; i += 3) {
+    v0.fromBufferAttribute(pos, i).applyMatrix4(m);
+    v1.fromBufferAttribute(pos, i + 1).applyMatrix4(m);
+    v2.fromBufferAttribute(pos, i + 2).applyMatrix4(m);
+    p.tri(fill, v0, v1, v2);
+  }
+  const edges = new THREE.EdgesGeometry(g);
+  const ep = edges.getAttribute('position');
+  for (let i = 0; i < ep.count; i += 2) {
+    v0.fromBufferAttribute(ep, i).applyMatrix4(m);
+    v1.fromBufferAttribute(ep, i + 1).applyMatrix4(m);
+    p.seg(line, v0, v1);
+  }
+}
+
+/* ============================================================================
+   LAYOUT (skill units, roughly metres)
+     land  y < 236      sea  y > 240      quay  y 236..246
+     main road y -14..1 running along x      plant yard x 4..184, y 2..116
+     warehouse x 179..241, y 92..148         shop x 135..165, y 165..187
+   ============================================================================ */
+const SEA_Z = -.6, PROMENADE = 224, QUAY_Y = 236;
+
+/* ---- the sheet: ground plate, beach, sea, and a far headland ---- */
+function buildSheet() {
+  const p = new Part();
+  /* land plate, dropping to the sea */
+  p.ext([[-140, -140, -4], [-140, 236, -4], [-140, 236, SEA_Z], [-140, 228, 0], [-140, -140, 0]],
+    [900, 0, 0], 'gr');
+  /* beach + surf line */
+  p.slab(-140, 224, 900, 14, .02, 'sand', 0);
+  p.poly('sand', [W(-140, 238, .04), W(760, 238, .04), W(760, 246, SEA_Z + .04), W(-140, 246, SEA_Z + .04)]);
+  p.draw(M_T, [-140, 238, 760, 238], .12);
+  for (let i = 0; i < 90; i++) {
+    const x = rand() * 780 - 20, y = 225 + rand() * 12;
+    p.seg('detail', W(x, y, .07), W(x + .5, y + .25, .07));
+  }
+  /* the water */
+  p.slab(-140, 238, 900, 260, SEA_Z, 'sea', .02);
+  /* far headland across the bay */
+  for (let i = 0; i < 8; i++) {
+    const x = -140 + i * 118;
+    const h = 7 + Math.sin(i * 1.6) * 4 + 4;
+    p.ext([[x, 344, SEA_Z], [x + 148, 344, SEA_Z], [x + 122, 344, SEA_Z + h], [x + 20, 344, SEA_Z + h + 5]],
+      [0, -30, 0], 'gs');
+  }
+  p.draw(M_T, [-140, 344, 760, 344], .1);
+  /* pines on the headland */
+  for (let i = 0; i < 34; i++) {
+    const x = -130 + rand() * 880, y = 330 + rand() * 10, s = .7 + rand() * .5;
+    p.box(x, y, SEA_Z, .3 * s, .3 * s, 1.2 * s);
+    const m = new THREE.Matrix4().compose(W(x, y, SEA_Z + 4.2 * s), new THREE.Quaternion(), v3(1.4 * s, 4 * s, 1.4 * s));
+    geoToPart(p, new THREE.ConeGeometry(1, 1, 7), m);
+  }
+  return p.build('sheet');
+}
+
+/* ---- the water hatching, on its own group so it can drift ---- */
+function buildWaves() {
+  const p = new Part();
+  for (let i = 0; i < 150; i++) {
+    const x = -140 + rand() * 900, y = 244 + rand() * 96;
+    const len = 3 + rand() * 6;
+    p.seg('detail', W(x, y, SEA_Z + .06), W(x + len, y + len * .5, SEA_Z + .06));
+  }
+  const g = p.build('waves');
+  return g;
+}
+
+/* ---- roads ---- */
+function buildRoads() {
+  const p = new Part();
+  const road = (x, y, w, d) => p.slab(x, y, w, d, 0, 'road', .02);
+  /* main road along the top of the plant */
+  road(-140, -14, 900, 15);
+  p.draw(M_T, [-140, -14, 760, -14], .07); p.draw(M_T, [-140, 1, 760, 1], .07);
+  for (let x = -140; x < 760; x += 7) p.draw(M_T, [x + 1, -6.4, x + 3.6, -6.4], .08);
+  /* the road down to the quay */
+  road(186, -14, 15, 260);
+  p.draw(M_T, [186, -14, 186, 246], .07); p.draw(M_T, [201, -14, 201, 246], .07);
+  for (let y = -14; y < 246; y += 7) p.draw(M_T, [189.6, y + 1, 189.6, y + 3.6], .08);
+  /* shop street + parking bays */
+  road(120, 168, 15, 40);
+  p.draw(M_T, [120, 168, 120, 208], .07); p.draw(M_T, [135, 168, 135, 208], .07);
+  for (let y = 172; y < 206; y += 7) p.draw(M_T, [123.6, y + 1, 123.6, y + 3.6], .08);
+  for (let i = 0; i < 4; i++) {
+    p.draw(M_T, [136, 174 + i * 8, 150, 174 + i * 8], .07);
+    p.draw(M_T, [150, 174 + i * 8, 150, 178 + i * 8], .07);
+  }
+  /* zebra outside the shop */
+  for (let i = 0; i < 5; i++) p.fill2(TOP(121.4, 190 + i * 3, .04), 0, 0, 12.2, 2, 'sand', .08);
+  /* roundabout at the crossroads */
+  p.fill2(TOP(178, -21, .03), 0, 0, 31, 31, 'road', .03);
+  p.draw(M_T, [193.5, -21, 193.5, 10], .08); p.draw(M_T, [178, -5.5, 209, -5.5], .08);
+  p.cylZ(193.5, -5.5, 0, 6, .5, 20, 'b');
+  p.cylZ(193.5, -5.5, .5, 1.6, 2.4, 10, 'b');
+  return p.build('roads');
+}
+
+/* ---- the plant yard: tarmac, staging pads, bays, rail siding ---- */
+function buildYard() {
+  const p = new Part();
+  p.slab(4, 2, 180, 116, .02, 'road', 0);
+  p.draw(M_T, [4, 44, 184, 44], .05);
+  p.draw(M_T, [4, 88, 184, 88], .05);
+  /* staging pads */
+  p.slab(138, 48, 42, 14, .04, 'deck', .02);
+  p.slab(138, 70, 42, 14, .04, 'deck', .02);
+  p.text(M_T, 'STAGING A', 152, 55, 1.5);
+  p.text(M_T, 'STAGING B', 152, 77, 1.5);
+  /* loading bays */
+  p.slab(22, 96, 24, 16, .04, 'deck', .02);
+  p.slab(52, 96, 24, 16, .04, 'deck', .02);
+  p.text(M_T, 'BAY 1', 34, 100, 1.5);
+  p.text(M_T, 'BAY 2', 64, 100, 1.5);
+  /* rail siding + timber loading platform */
+  p.slab(96, 6, 9, 112, .04, 'ground', .02);
+  p.draw(M_T, [99, 6, 99, 118], .08); p.draw(M_T, [101.6, 6, 101.6, 118], .08);
+  for (let y = 8; y < 118; y += 4) p.draw(M_T, [98.6, y, 102, y], .09);
+  p.slab(105, 42, 8, 34, .04, 'deck', .02);
+  p.text(M_T, 'RAIL', 109, 80, 1.4);
+  /* perimeter fence: south + east */
+  const fence = (x0, y0, x1, y1) => {
+    const n = Math.max(1, Math.round(Math.hypot(x1 - x0, y1 - y0) / 4));
+    for (let i = 0; i <= n; i++) {
+      const x = lerp(x0, x1, i / n), y = lerp(y0, y1, i / n);
+      p.box(x, y, 0, .3, .3, 2.8, 'b');
+    }
+    p.seg('detail', W(x0, y0, 2.5), W(x1, y1, 2.5));
+    p.seg('detail', W(x0, y0, 1.3), W(x1, y1, 1.3));
+  };
+  fence(4, 118, 184, 118);
+  fence(184, 2, 184, 118);
+  return p.build('yard');
+}
+
+/* ---- the factory ---- */
+function buildFactory() {
+  const p = new Part();
+  /* main shed, x 12..58, y 40..80 */
+  p.box(35, 60, 0, 46, 40, 13, 'n');
+  /* sawtooth roof with lit monitors */
+  for (let i = 0; i < 4; i++) {
+    const x = 15 + i * 11;
+    p.ext([[x, 41, 13], [x + 9, 41, 13], [x + 9, 41, 17.5], [x, 41, 17.5]], [0, 38, 0], 'n');
+    p.poly('w', [W(x, 79, 17.9), W(x + 9, 79, 17.9), W(x + 9, 78, 13.6), W(x, 78, 13.6)]);
+  }
+  /* roller doors on the north face */
+  for (const dx of [20, 34, 48]) p.band(SIDE(13, dy(60, dx), 8), 0, 5.4, 8, 6.4, 'k', .06);
+  /* office block */
+  p.box(70, 42, 0, 16, 14, 12, 'k');
+  for (let i = 0; i < 3; i++) p.band(FRONT(63, 49, 11), 1.4 + i * 5, 4, 11, 3.4, 'w', .06);
+  p.band(SIDE(62, 36, 11), 0, 12, 11, 3.4, 'w', .06);
+  /* the conveyor, running south to the bays */
+  p.slab(56, 42, 9, 50, 2.4, 'steel', .06);
+  for (let y = 46; y < 92; y += 9) p.box(60.5, y, 0, 2.2, 2.2, 2.4, 'b');
+  p.draw(M_T, [56, 42, 56, 92], .12); p.draw(M_T, [65, 42, 65, 92], .12);
+  /* chimneys */
+  p.cylZ(76, 70, 0, 3.2, 27, 12, 'b'); p.cylZ(76, 70, 27, 3.7, 1.4, 12, 'k');
+  p.cylZ(84, 66, 0, 2.3, 21, 12, 'b'); p.cylZ(84, 66, 21, 2.6, 1.2, 12, 'k');
+  /* storage tank */
+  p.cylZ(96, 86, 0, 6.5, 9, 18, 'b');
+  return p.build('factory');
+  function dy(c, off) { return c - off; }
+}
+
+/* ---- the warehouse: shell cut open, racks, docks ---- */
+function buildWarehouse() {
+  const p = new Part();
+  /* shell, x 179..241, y 92..148 */
+  p.box(210, 120, 0, 62, 56, 15, 'n');
+  /* the near (north) wall is cut away so you can see in */
+  p.slab(180, 93, 60, 54, .06, 'ground', .01);
+  /* cut edge: low wall + hatch */
+  p.box(210, 92.4, 0, 60, 1.6, 3.4, 'b');
+  for (let x = 182; x < 240; x += 3) p.seg('detail', W(x, 92.4, 3.4), W(x + 1.5, 93.6, 3.4));
+  /* roof outline only, so the interior reads as a section */
+  p.draw(M_T, [179, 148, 241, 148], .1);
+  /* racks: three aisles, three levels */
+  for (let r = 0; r < 3; r++) {
+    const rx = 186 + r * 19;
+    for (let lv = 0; lv < 3; lv++) {
+      const z = 1.2 + lv * 4.6;
+      p.slab(rx, 100, 4.2, 38, z, 'k', .05);
+      p.draw(M_T, [rx, 100, rx + 4.2, 100], .1);
+      p.draw(M_T, [rx, 138, rx + 4.2, 138], .1);
+      for (let b = 0; b < 7; b++) {
+        if ((b * 3 + r * 5 + lv * 7) % 4 === 0) continue;
+        p.box(rx + 2.1, 103 + b * 5, z + .4, 3, 3, 2.8, 'b');
+      }
+    }
+  }
+  /* lit windows high on the far wall */
+  for (let i = 0; i < 8; i++) p.band(FRONT(182 + i * 7, 147.4, 14), .5, 5.4, 14, 3.6, 'w', .06);
+  /* high bay lamps over the aisles, on the section face */
+  for (let r = 0; r < 3; r++) {
+    const rx = 186 + r * 19;
+    p.box(rx + 2.1, 119, 13.4, 2.4, 2.4, .5, 'l');
+    p.box(rx + 2.1, 103, 13.4, 2.4, 2.4, .5, 'l');
+    p.box(rx + 2.1, 135, 13.4, 2.4, 2.4, .5, 'l');
+  }
+  /* roof lights */
+  for (let i = 0; i < 6; i++) p.slab(184 + i * 9.4, 106, 6.4, 10, 15.3, 'w', .05);
+  /* docks + lane */
+  p.slab(243, 90, 18, 7, .04, 'deck', .02);
+  p.slab(263, 90, 18, 7, .04, 'deck', .02);
+  p.text(M_T, 'DOCK A', 252, 93.5, 1.4);
+  p.text(M_T, 'DOCK B', 272, 93.5, 1.4);
+  p.draw(M_T, [243, 88, 281, 88], .06);
+  p.draw(M_T, [243, 84, 281, 84], .06);
+  return p.build('warehouse');
+}
+
+/* ---- the corner shop on the seafront ---- */
+function buildShop() {
+  const p = new Part();
+  /* shop: x 136..166, y 166..188 */
+  p.box(151, 177, 0, 30, 22, 9.5, 'n');
+  /* shopfront glazing on the north face + door */
+  p.band(FRONT(138, 166, 8.4), 1, 26, 8.4, 5.6, 'g', .06);
+  p.band(FRONT(150, 166, 8.4), 1, 5, 8.4, 5.6, 'g', .07);
+  /* awning over the front */
+  p.ext([[135, 164, 6.4], [167, 164, 6.4], [167, 172, 6.4], [135, 172, 6.4]], [0, 0, -2.4], 'k');
+  /* flats above */
+  p.box(151, 158, 0, 26, 16, 14, 'k');
+  for (let i = 0; i < 4; i++) {
+    p.band(FRONT(139 + i * 6, 150.4, 12.4), .5, 4.2, 12.4, 4, 'w', .06);
+    p.band(FRONT(139 + i * 6, 165.6, 12.4), .5, 4.2, 12.4, 4, 'w', .06);
+  }
+  /* neighbours */
+  p.box(120, 178, 0, 16, 16, 11.5, 'n');
+  for (let i = 0; i < 3; i++) {
+    p.band(FRONT(113, 171 + i * 5.4, 9.4), .5, 4.4, 9.4, 3.4, 'w', .06);
+    p.band(SIDE(112.4, 171 + i * 5.4, 9.4), 0, 14, 9.4, 3.4, 'w', .06);
+  }
+  p.box(178, 176, 0, 16, 18, 13, 'n');
+  for (let i = 0; i < 3; i++) p.band(FRONT(171, 168 + i * 5.6, 10.4), .5, 4.4, 10.4, 3.6, 'w', .06);
+  /* the forecourt: crates and a bike rack */
+  p.slab(136, 190, 30, 8, .03, 'deck', .02);
+  for (let i = 0; i < 3; i++) p.box(140 + i * 4, 194, .2, 2.4, 2.4, 2.2, 'b');
+  return p.build('shop');
+}
+
+/* ---- the quay: wall, bollards, cranes, jetty, lighthouse ---- */
+function buildQuay() {
+  const p = new Part();
+  /* quay wall dropping to the water */
+  p.ext([[-140, QUAY_Y, 0], [560, QUAY_Y, 0], [560, QUAY_Y + 10, 0], [-140, QUAY_Y + 10, 0]], [0, 0, -3], 's');
+  p.draw(M_T, [-140, QUAY_Y, 560, QUAY_Y], .14);
+  for (let x = -130; x < 550; x += 5) p.seg('detail', W(x, QUAY_Y + 10, -2.6), W(x + 5, QUAY_Y + 10, -2.6));
+  /* bollards */
+  for (let x = -120; x < 540; x += 44) p.cylZ(x, QUAY_Y + 5, 0, 1, 1.6, 10, 'st');
+  /* two container gantries */
+  for (const cx of [150, 300]) {
+    for (const lx of [cx, cx + 20]) {
+      for (const ly of [QUAY_Y - 6, QUAY_Y - 1]) {
+        p.box(lx, ly, 0, 2.2, 2.2, 17, 'k');
+        p.seg('line', W(lx, ly, 0), W(lx + (lx === cx ? 6 : -6), ly + (ly === QUAY_Y - 6 ? 6 : -6), 12));
+      }
+    }
+    p.box(cx + 10, QUAY_Y - 3.5, 17, 30, 7, 2.6, 'k');       /* girder   */
+    p.box(cx + 26, QUAY_Y - 3.5, 25, 8, 5, 2.4, 'k');        /* machinery*/
+    p.box(cx + 6, QUAY_Y - 3.5, 19.6, 1.2, 1.2, 1.2, 'l');   /* lamp    */
+  }
+  /* timber jetty */
+  p.ext([[236, QUAY_Y + 10, SEA_Z + .2], [248, QUAY_Y + 10, SEA_Z + .2],
+    [248, 330, SEA_Z + .2], [236, 330, SEA_Z + .2]], [0, 0, 1.8], 'b');
+  for (let y = QUAY_Y + 18; y < 328; y += 12) {
+    p.cylZ(240, y, SEA_Z + 2, .55, 3.6, 8, 'b');
+    p.cylZ(244, y, SEA_Z + 2, .55, 3.6, 8, 'b');
+  }
+  p.cylZ(242, 322, SEA_Z + 2, .5, 6, 8, 'st');
+  p.cylZ(242, 322, SEA_Z + 8, .7, .5, 8, 'l');
+  /* lighthouse mole */
+  p.ext([[26, QUAY_Y, 0], [62, QUAY_Y, 0], [62, 300, 0], [26, 300, 0]], [0, 0, 1.4], 's');
+  p.cylZ(44, 268, 1.4, 4.6, 18, 14, 'b');
+  p.cylZ(44, 268, 19.4, 5.2, 1.4, 14, 'k');
+  p.cylZ(44, 268, 20.8, 2.6, 4.6, 12, 'w');
+  p.cylZ(44, 268, 25.4, 4.2, 1.4, 14, 'k');
+  p.draw(M_T, [30, 270, 58, 270], .12);
+  /* stacked containers on the quay */
+  for (let i = 0; i < 10; i++) {
+    const x = 90 + (i % 5) * 11, y = QUAY_Y - 12 + Math.floor(i / 5) * 6;
+    p.box(x, y, 0, 9.6, 5, 4.4, (i % 3) ? 'k' : 'b');
+  }
+  return p.build('quay');
+}
+
+/* ---- trees, lamps, benches ---- */
+function buildFurniture() {
+  const p = new Part();
+  const tree = (x, y, z, s = 1) => {
+    p.box(x, y, z, .5 * s, .5 * s, 2.4 * s);
+    const m = new THREE.Matrix4().compose(W(x, y, z + 4.2 * s), new THREE.Quaternion(), v3(2.2 * s, 2.6 * s, 2.2 * s));
+    geoToPart(p, new THREE.IcosahedronGeometry(1, 0), m);
+  };
+  const pine = (x, y, z, s = 1) => {
+    p.box(x, y, z, .32 * s, .32 * s, 1.3 * s);
+    const m = new THREE.Matrix4().compose(W(x, y, z + 4.6 * s), new THREE.Quaternion(), v3(1.6 * s, 4.6 * s, 1.6 * s));
+    geoToPart(p, new THREE.ConeGeometry(1, 1, 7), m);
+  };
+  const lampPost = (x, y, z = 0) => {
+    p.box(x, y, z, .16, .16, 4.6);
+    p.box(x, y, z + 4.6, .6, .6, .38, 'l');
+    p.seg('line', W(x - .24, y, z + 4.98), W(x + .24, y, z + 4.98));
+  };
+  const bench = (x, y, z = 0) => {
+    p.box(x, y, z + .4, 1.5, .5, .16);
+    p.box(x - .6, y, z + .85, .18, .5, .6); p.box(x + .6, y, z + .85, .18, .5, .6);
+  };
+  /* pine belt behind the plant */
+  for (let i = 0; i < 40; i++) pine(20 + rand() * 200, 122 + rand() * 40, 0, .8 + rand() * .6);
+  /* promenade: trees, lamps, benches */
+  for (let i = 0; i < 20; i++) {
+    const x = -110 + i * 36;
+    tree(x, PROMENADE + 2, .3, .9 + rand() * .35);
+    lampPost(x + 18, PROMENADE + 2, .3);
+    if (i % 2 === 0) bench(x + 9, PROMENADE + 5, .3);
+  }
+  /* lamps in the plant, on the road, round the warehouse */
+  for (const [x, y] of [[10, 8], [92, 8], [10, 112], [92, 112], [176, 20], [176, 100],
+    [150, 60], [150, 160], [250, 60], [250, 160], [120, 214], [166, 214], [193, 60]]) {
+    lampPost(x, y);
+  }
+  /* street trees along the main road and the waterfront */
+  for (let i = 0; i < 12; i++) tree(40 + i * 18, -6 + (i % 2 ? 9 : -9), 0, .9 + rand() * .3);
+  for (let i = 0; i < 8; i++) tree(184 + (i % 2 ? 10 : -10), 20 + i * 26, 0, .9 + rand() * .3);
+  for (let i = 0; i < 6; i++) tree(160 + i * 12, 214, 0, .9 + rand() * .3);
+  /* hedges / shrubs on the shop side */
+  for (let i = 0; i < 10; i++) {
+    const x = 100 + rand() * 70, y = 206 + rand() * 12;
+    const m = new THREE.Matrix4().compose(W(x, y, 1.1), new THREE.Quaternion(), v3(1.8, 1.4, 1.8));
+    geoToPart(p, new THREE.IcosahedronGeometry(1, 0), m, 'grass');
+  }
+  return p.build('furniture');
+}
+
+/* ============================================================================
+   ACTORS — small groups, each built once and moved by its own state machine
+   forward = local +x, so rotation.y = -atan2(dy, dx) points them along a route
+   ============================================================================ */
+function pallet() {
+  const p = new Part();
+  p.box(0, 0, 0, 2.4, 2.4, .18, 'k');
+  p.box(-.9, -.9, .18, 1, 1, .6, 'k');
+  p.box(.9, -.9, .18, 1, 1, .6, 'k');
+  p.box(-.9, .9, .18, 1, 1, .6, 'k');
+  p.box(.9, .9, .18, 1, 1, .6, 'k');
+  return p.build('pallet');
+}
+function truck() {
+  const p = new Part();
+  /* cab (+x) */
+  p.box(2.9, 0, 1.4, 3.4, 5.4, 2.9, 'k');
+  p.band(SIDE(4.55, 0, 4.2), 0, 5, 4.2, 1.5, 'g', .06);
+  p.box(1.0, 0, 4.3, 1.6, 5, .12, 'l');            /* roof beacon bar */
+  /* bed (-x) */
+  p.box(-2.6, 0, 1.1, 8.4, 5.2, .4, 'n');
+  p.box(-6.6, -2.5, 1.5, .3, .3, 1.2, 'b');
+  p.box(-6.6, 2.5, 1.5, .3, .3, 1.2, 'b');
+  for (const wx of [4, 1.6, -2.6, -4.6]) {
+    p.wheel(wx, -2.7, 1.05, 1.05, .6); p.wheel(wx, 2.7, 1.05, 1.05, .6);
+  }
+  return p.build('truck');
+}
+function van() {
+  const p = new Part();
+  p.box(0, 0, 1.2, 6.2, 3, 2.8, 'n');
+  p.band(SIDE(3.05, 0, 3.9), .2, 2.6, 3.9, 1.3, 'g', .06);
+  p.band(SIDE(-3.05, 0, 3.9), .2, 2.6, 3.9, 1.3, 'g', .06);
+  p.box(1.4, 0, 4.0, .5, 1.4, .16, 'l');
+  for (const wx of [1.9, -1.9]) { p.wheel(wx, -1.6, 1, .95, .55); p.wheel(wx, 1.6, 1, .95, .55); }
+  return p.build('van');
+}
+function forklift() {
+  const p = new Part();
+  p.box(-.4, 0, .9, 2.6, 3, 1.7, 'k');              /* body */
+  p.box(-.4, 0, 2.6, 1.6, 2.4, .16, 'b');            /* seat back / cage floor */
+  for (const [ax, ay] of [[.2, 1.3], [.2, -1.3], [-1.2, 1.3], [-1.2, -1.3]]) {
+    p.box(ax, ay, 2.6, .18, .18, 2.4, 'k');
+  }
+  p.box(-.4, 0, 5.0, .34, .34, .26, 'l');             /* beacon */
+  p.box(1.7, -1.05, .5, .26, .26, 4.2, 'st');        /* mast */
+  p.box(1.7, 1.05, .5, .26, .26, 4.2, 'st');
+  p.box(2.2, 0, .3, 1.4, 2.6, .16, 'st');             /* forks */
+  for (const [wx, wy] of [[.2, 1.5], [.2, -1.5], [-1.6, 1.1], [-1.6, -1.1]]) p.wheel(wx, wy, .9, .85, .5);
+  return p.build('forklift');
+}
+function boat() {
+  const p = new Part();
+  /* hull: a tapered prism, bow toward +x */
+  const plan = [[3.4, 0], [1.2, -1.5], [-2.6, -1.5], [-2.6, 1.5], [1.2, 1.5]];
+  p.ext(plan.map(([a, b]) => [a, b, 0]), [0, 0, 1.5], 'b');
+  p.poly('deck', plan.map(([a, b]) => W(a, b, 1.5)));
+  p.box(.2, 0, 1.5, 2.6, 2.2, 1.9, 'n');             /* cabin */
+  p.box(.2, 0, 3.4, 2.8, 2.4, .16, 'b');              /* roof  */
+  p.cylZ(-1, 0, 3.5, .12, 4.4, 6, 'st');              /* mast  */
+  p.cylZ(.2, 0, 3.5, .3, .5, 8, 'l');                 /* light */
+  return p.build('boat');
+}
+function train() {
+  const p = new Part();
+  p.box(0, 0, 1.2, 10, 3.4, 3.4, 'k');               /* loco */
+  p.band(SIDE(5.0, 0, 4.4), .2, 2.8, 4.4, 1.4, 'g', .06);
+  p.box(3.2, 0, 4.6, .8, 2, .2, 'l');
+  for (const wx of [3.4, -3.4]) {
+    p.box(-8 - wx, 0, 1.2, 7.4, 3.6, .6, 'n');        /* flat wagon */
+    p.box(-8 - wx, -1.7, 1.2, .3, .3, 1.6, 'b');
+    p.box(-8 - wx, 1.7, 1.2, .3, .3, 1.6, 'b');
+    for (let i = 0; i < 3; i++) p.box(-8 - wx, 0, 1.8, 2.2, 2.2, 2.4, 'b');
+    for (const wy of [-1.8, 1.8]) { p.wheel(wx, wy, .9, .9, .5); p.wheel(-8 - wx, wy, .9, .9, .5); }
+  }
+  return p.build('train');
+}
+function gull() {
+  const p = new Part();
+  p.box(0, 0, 0, 2, .5, .12, 'b');
+  p.box(-.4, 0, 0, 1.4, 2.6, .1, 'b');
+  return p.build('gull');
+}
+
+/* ---- assemble the static scene ---- */
+const waves = buildWaves();
+scene.add(buildSheet(), buildRoads(), buildYard(), buildFactory(),
+  buildWarehouse(), buildShop(), buildQuay(), buildFurniture(), waves);
+
+/* ---- actors ---- */
+const gTruck = truck(), gVan = van(), gFork = forklift(),
+  gBoat = boat(), gTrain = train(), gGullProto = gull();
+scene.add(gTruck, gVan, gFork, gBoat, gTrain);
+const gulls = [];
+for (let i = 0; i < 6; i++) {
+  const g = gGullProto.clone(); g.scale.setScalar(1.5); scene.add(g);
+  gulls.push({ o: g, r: 30 + rand() * 80, ph: rand() * TAU, sp: .25 + rand() * .2, alt: 10 + rand() * 14 });
+}
+/* two separate pallet pools so the belt and the truck never fight over one */
+const beltPallets = [], truckPallets = [];
+for (let i = 0; i < 5; i++) { const q = pallet(); q.visible = false; scene.add(q); beltPallets.push(q); }
+for (let i = 0; i < 2; i++) { const q = pallet(); q.visible = false; scene.add(q); truckPallets.push(q); }
+
+/* ============================================================================
+   SIMULATION
+   ============================================================================ */
+/* flatbed: plant bay -> road -> warehouse dock -> back.  [x, y, holdSeconds] */
+const TRUCK_ROUTE = [
+  [34, 112, 3], [34, 108, 0], [20, 104, 0], [10, 96, 0], [10, 40, 0],
+  [14, 4, 0], [60, 6, 0], [176, 6, 0], [193, 4, 0], [199, 40, 0],
+  [210, 74, 0], [232, 84, 0], [252, 86, 5], [272, 86, 0], [288, 84, 0],
+  [296, 50, 0], [300, 4, 0], [240, 6, 0], [150, 6, 0], [40, 4, 0],
+  [12, 30, 0], [10, 96, 0], [20, 108, 0], [34, 112, 0],
+];
+let trI = 0, trHold = 0, trLoaded = false;
+function drive(obj, route, state, speed, onArrive) {
+  const a = route[state.i];
+  const b = route[Math.min(state.i + 1, route.length - 1)];
+  const dx = b[0] - a[0], dy = b[1] - a[1];
+  const d = Math.hypot(dx, dy);
+  const f = d < .01 ? 1 : Math.min(1, (speed * state.dt) / d);
+  obj.position.set(a[0] + dx * f, 0, a[1] + dy * f);
+  if (d > .01) obj.rotation.y = -Math.atan2(dy, dx);
+  if (f >= 1) {
+    if (a[2]) state.hold = a[2];
+    if (onArrive) onArrive(state.i);
+    state.i++;
+    if (state.i >= route.length - 1) { state.i = 0; if (onArrive) onArrive(0, true); }
+  }
+}
+const trState = { i: 0, hold: 0, dt: 0 };
+function truckStep(dt) {
+  trState.dt = dt;
+  if (trState.hold > 0) { trState.hold -= dt; return; }
+  const at = trState.i;
+  drive(gTruck, TRUCK_ROUTE, trState, 13, (i, looped) => {
+    if (i === 0 && !looped) trLoaded = true;      /* loaded at the plant */
+    if (i === 12) trLoaded = false;               /* emptied at dock A   */
+  });
+  void at;
+  /* the load rides on the bed */
+  for (let i = 0; i < truckPallets.length; i++) {
+    const on = trLoaded && i === 0;
+    truckPallets[i].visible = on;
+    if (on) {
+      const c = Math.cos(gTruck.rotation.y), s = Math.sin(gTruck.rotation.y);
+      const lx = -4.2 - i * 2.7;
+      truckPallets[i].position.set(
+        gTruck.position.x + lx * c, 1.5,
+        gTruck.position.z + lx * s);
+      truckPallets[i].rotation.y = gTruck.rotation.y;
+    }
+  }
+}
+
+/* van: warehouse dock -> shop forecourt -> back */
+const VAN_ROUTE = [
+  [262, 84, 4], [252, 80, 0], [232, 78, 0], [200, 70, 0], [193, 30, 0],
+  [193, 4, 0], [170, 6, 0], [128, 6, 0], [127, 60, 0], [127, 150, 0],
+  [130, 196, 0], [140, 202, 6], [150, 202, 0], [141, 202, 0], [130, 190, 0],
+  [127, 100, 0], [127, 40, 0], [150, 6, 0], [200, 6, 0], [230, 70, 0],
+  [250, 80, 0], [262, 84, 0],
+];
+const vaState = { i: 0, hold: 0, dt: 0 };
+function vanStep(dt) {
+  vaState.dt = dt;
+  if (vaState.hold > 0) { vaState.hold -= dt; return; }
+  drive(gVan, VAN_ROUTE, vaState, 11, null);
+}
+
+/* forklift: conveyor head -> bay 1 -> back */
+const FORK_ROUTE = [
+  [56, 92, 0], [48, 98, 0], [38, 102, 0], [30, 106, 2.5], [38, 112, 0],
+  [50, 106, 0], [58, 98, 0], [56, 92, 0],
+];
+const fkState = { i: 0, hold: 0, dt: 0 };
+let forkCarrying = false;
+function forkStep(dt) {
+  fkState.dt = dt;
+  if (fkState.hold > 0) { fkState.hold -= dt; return; }
+  const i = fkState.i;
+  drive(gFork, FORK_ROUTE, fkState, 8, (idx, looped) => {
+    if (idx === 2) forkCarrying = true;
+    if (idx === 5 || looped) forkCarrying = false;
+  });
+  void i;
+  /* a pallet rides on the forks while carrying */
+  beltPallets[4].visible = forkCarrying;
+  if (forkCarrying) {
+    const c = Math.cos(gFork.rotation.y), s = Math.sin(gFork.rotation.y);
+    beltPallets[4].position.set(gFork.position.x + 2.4 * c, 1.5, gFork.position.z + 2.4 * s);
+    beltPallets[4].rotation.y = gFork.rotation.y;
+  }
+}
+
+/* conveyor belt: pallets creep south along the belt */
+let beltPhase = 0;
+function beltStep(dt) {
+  beltPhase = (beltPhase + dt / 7) % 1;
+  const SLOTS = 4;
+  for (let i = 0; i < 4; i++) {
+    const u = (beltPhase + i / SLOTS) % 1;
+    if (u < .8) {
+      const q = beltPallets[i];
+      q.visible = true;
+      q.position.set(60.5, 44 + u * 46, 3.2);
+      q.rotation.y = 0;
+    } else beltPallets[i].visible = false;
+  }
+}
+
+/* freight train: runs west along the siding every so often */
+let trainWait = 20, trainX = 330;
+function trainStep(dt) {
+  if (trainWait > 0) {
+    trainWait -= dt;
+    gTrain.visible = false;
+    return;
+  }
+  gTrain.visible = true;
+  trainX -= 17 * dt;
+  if (trainX < -70) { trainX = 350; trainWait = 26; gTrain.visible = false; }
+  gTrain.position.set(trainX, 0, 100.3);
+  gTrain.rotation.y = 0;
+}
+
+/* the boat works across the bay */
+let boatT = 0;
+function boatStep(dt) {
+  boatT += dt;
+  const u = (boatT / 46) % 1;
+  const x = -80 + u * 620;
+  const y = 268 + Math.sin(boatT * .05) * 14;
+  gBoat.position.set(x, SEA_Z + .3, y);
+  gBoat.rotation.y = Math.PI / 2 + Math.cos(boatT * .05) * .22;
+}
+
+/* gulls circle over the water */
+function gullStep(t) {
+  for (const g of gulls) {
+    const a = t * g.sp + g.ph;
+    g.o.position.set(120 + Math.cos(a) * g.r,
+      SEA_Z + g.alt + Math.sin(a * 1.7) * 2.4,
+      290 + Math.sin(a) * g.r * .8);
+    g.o.rotation.y = -a + Math.PI / 2;
+    g.o.rotation.z = Math.sin(a * 1.7) * .25;
+  }
+}
+
+/* the water hatching drifts, and wraps seamlessly */
+function waveStep(t) {
+  const span = 100;
+  const off = (t * 1.1) % span;
+  waves.children.forEach((c) => { c.position.z = SEA_Z * 0; });
+  waves.position.z = -off;
+}
+
+/* ============================================================================
+   CLOCK — one in-world day = 4 real minutes
+   ============================================================================ */
+const DAY_LEN = 240;
+let dayPhase = .30, elapsed = 0;
+
+function nightAmount(hh) {
+  /* lamps come up at dusk, go out at dawn */
+  const dusk = smooth((hh - 18.1) / 1.7);          /* 18:06 -> 19:48 */
+  const dawn = smooth((hh - 5.4) / 1.5) * (1 - smooth((hh - 7.5) / 1.3));
+  return Math.max(dusk, dawn);
+}
+
+function draw(t) {
+  if (fit) {
+    const tgt = fit.target.clone();
+    tgt.x += Math.sin(t / 44) * 7;
+    tgt.z += Math.cos(t / 33) * 5;
+    applyCamera(tgt, fit.zoom * (1 + .006 * Math.sin(t / 13)));
+  }
+  const hh = dayPhase * 24;
+  const night = nightAmount(hh);
+  shade(night);
+  const hhmm = String(Math.floor(hh)).padStart(2, '0') + ':' +
+    String(Math.floor((hh % 1) * 60)).padStart(2, '0');
+  capEl.textContent = 'ISO HARBOUR · ' + hhmm +
+    (night > .45 ? '  ·  night' : '  ·  day') +
+    '  ·  theme: ' + (DARK ? 'dark' : 'light');
+  renderer.render(scene, camera);
+}
+
+/* ---- one loop ---- */
+resize();
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min((now - last) / 1000, .05);
+  last = now;
+  if (!REDUCED) {
+    elapsed += dt;
+    dayPhase = (dayPhase + dt / DAY_LEN) % 1;
+    truckStep(dt); vanStep(dt); forkStep(dt); beltStep(dt);
+    trainStep(dt); boatStep(dt); gullStep(elapsed); waveStep(elapsed);
+  }
+  draw(elapsed);
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+/* expose the bits, so it is easy to inspect from the console */
+window.harbour = {
+  scene, camera, renderer, gTruck, gVan, gFork, gBoat, gTrain,
+  setHour(h) { dayPhase = (h / 24) % 1; draw(elapsed); },
+  jump(s) { elapsed += s; },
+  stats() { return renderer.info.render; },
+};
+</script>
+</body>
+</html>

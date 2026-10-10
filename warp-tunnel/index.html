@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Warp Tunnel — Lively Wallpaper</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #05010f; }
+  #app { position: fixed; inset: 0; }
+  #app canvas { display: block; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<script src="lib/three.min.js"></script>
+
+<script>
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x05010f);
+scene.fog = new THREE.Fog(0x05010f, 40, 300);
+
+const camera = new THREE.PerspectiveCamera(75, innerWidth / innerHeight, 0.1, 1000);
+camera.position.set(0, 0, 8);
+camera.lookAt(0, 0, -40);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+document.getElementById('app').appendChild(renderer.domElement);
+
+// ------- neon rails
+const railMat = new THREE.MeshBasicMaterial({ color: 0x22e0ff });
+for (const x of [-6.2, 6.2]) {
+  for (const y of [-6.2, 6.2]) {
+    const rail = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.12, 600), railMat);
+    rail.position.set(x, y, -300);
+    scene.add(rail);
+  }
+}
+
+// ------- rings
+const RINGS = 46, SPACING = 9, TOTAL = RINGS * SPACING;
+const rings = [];
+const ringGeo = new THREE.TorusGeometry(6.4, 0.16, 8, 48);
+for (let i = 0; i < RINGS; i++) {
+  const mat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  const ring = new THREE.Mesh(ringGeo, mat);
+  ring.position.z = -i * SPACING;
+  scene.add(ring);
+  rings.push(ring);
+}
+
+// ------- floating sparks
+const SP = 500;
+const spPos = new Float32Array(SP * 3);
+for (let i = 0; i < SP; i++) {
+  const a = Math.random() * Math.PI * 2;
+  const r = 2 + Math.random() * 6;
+  spPos[i * 3] = Math.cos(a) * r;
+  spPos[i * 3 + 1] = Math.sin(a) * r;
+  spPos[i * 3 + 2] = -Math.random() * TOTAL;
+}
+const spGeo = new THREE.BufferGeometry();
+spGeo.setAttribute('position', new THREE.BufferAttribute(spPos, 3));
+function dotTexture() {
+  const c = document.createElement('canvas'); c.width = c.height = 64;
+  const g = c.getContext('2d');
+  const grd = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+  grd.addColorStop(0, 'rgba(255,255,255,1)');
+  grd.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = grd; g.beginPath(); g.arc(32, 32, 32, 0, Math.PI * 2); g.fill();
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+}
+scene.add(new THREE.Points(spGeo, new THREE.PointsMaterial({
+  map: dotTexture(), color: 0x9beeff, size: 0.5, transparent: true, opacity: 0.9,
+  depthWrite: false, blending: THREE.AdditiveBlending
+})));
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const clock = new THREE.Clock();
+const SPEED = 70;
+const col = new THREE.Color();
+
+function animate() {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  const t = clock.elapsedTime;
+
+  for (let i = 0; i < RINGS; i++) {
+    const ring = rings[i];
+    ring.position.z += SPEED * dt;
+    if (ring.position.z > 12) ring.position.z -= TOTAL;
+
+    // gentle radius breathing + swirl
+    const s = 1 + Math.sin(t * 0.9 + ring.position.z * 0.05) * 0.06;
+    ring.scale.set(s, s, 1);
+    ring.rotation.z = t * 0.4 + ring.position.z * 0.02;
+
+    col.setHSL((t * 0.05 + i * 0.02) % 1, 1.0, 0.6);
+    ring.material.color.copy(col);
+  }
+
+  // sparks drift toward camera
+  const arr = spGeo.attributes.position.array;
+  for (let i = 0; i < SP; i++) {
+    arr[i * 3 + 2] += SPEED * 0.8 * dt;
+    if (arr[i * 3 + 2] > 10) arr[i * 3 + 2] -= TOTAL;
+  }
+  spGeo.attributes.position.needsUpdate = true;
+
+  camera.position.x = Math.sin(t * 0.5) * 1.4;
+  camera.position.y = Math.cos(t * 0.4) * 1.0;
+  camera.lookAt(Math.sin(t * 0.5) * 1.4, Math.cos(t * 0.4) * 1.0, -40);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(animate);
+}
+animate();
+</script>
+</body>
+</html>

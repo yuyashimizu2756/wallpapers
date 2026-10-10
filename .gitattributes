@@ -1,0 +1,13 @@
+# These wallpapers are plain HTML/JS that people may edit on Windows and run straight off
+# file://, so keep line endings as committed (LF) instead of letting Git rewrite them to CRLF
+# on checkout — the noise would show up as a whole-file diff on every Windows machine.
+* text=auto eol=lf
+
+# ... except the one genuinely Windows-only launcher.
+start-gallery.cmd text eol=crlf
+
+*.png binary
+*.jpg binary
+*.gif binary
+*.woff2 binary
+*.mp4 binary

@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Neon Plexus — Lively Wallpaper</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #04070f; }
+  #app { position: fixed; inset: 0; }
+  #app canvas { display: block; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<script src="lib/three.min.js"></script>
+
+<script>
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x04070f);
+scene.fog = new THREE.FogExp2(0x04070f, 0.0045);
+
+const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 4000);
+camera.position.set(0, 0, 150);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.getElementById('app').appendChild(renderer.domElement);
+
+function dotTexture() {
+  const c = document.createElement('canvas'); c.width = c.height = 64;
+  const g = c.getContext('2d');
+  const grd = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+  grd.addColorStop(0, 'rgba(255,255,255,1)');
+  grd.addColorStop(0.4, 'rgba(255,255,255,0.5)');
+  grd.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = grd; g.beginPath(); g.arc(32, 32, 32, 0, Math.PI * 2); g.fill();
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+}
+
+const world = new THREE.Group();
+scene.add(world);
+
+// ------- nodes
+const N = 95;
+const BOUND = new THREE.Vector3(120, 70, 120);
+const nodes = [];
+for (let i = 0; i < N; i++) {
+  nodes.push({
+    p: new THREE.Vector3((Math.random() - 0.5) * 2 * BOUND.x, (Math.random() - 0.5) * 2 * BOUND.y, (Math.random() - 0.5) * 2 * BOUND.z),
+    v: new THREE.Vector3((Math.random() - 0.5), (Math.random() - 0.5), (Math.random() - 0.5)).multiplyScalar(6)
+  });
+}
+const nodePos = new Float32Array(N * 3);
+const nodeGeo = new THREE.BufferGeometry();
+nodeGeo.setAttribute('position', new THREE.BufferAttribute(nodePos, 3));
+world.add(new THREE.Points(nodeGeo, new THREE.PointsMaterial({
+  map: dotTexture(), color: 0x9beeff, size: 4.5, transparent: true, opacity: 0.95,
+  depthWrite: false, blending: THREE.AdditiveBlending
+})));
+
+// ------- links
+const MAXSEG = N * (N - 1) / 2;
+const linkPos = new Float32Array(MAXSEG * 6);
+const linkCol = new Float32Array(MAXSEG * 6);
+const linkGeo = new THREE.BufferGeometry();
+linkGeo.setAttribute('position', new THREE.BufferAttribute(linkPos, 3));
+linkGeo.setAttribute('color', new THREE.BufferAttribute(linkCol, 3));
+const links = new THREE.LineSegments(linkGeo, new THREE.LineBasicMaterial({
+  vertexColors: true, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false
+}));
+world.add(links);
+
+const DIST = 34, DIST2 = DIST * DIST;
+const colNear = new THREE.Color('#22e0ff');
+const colFar = new THREE.Color('#ff2d8d');
+const tmp = new THREE.Color();
+
+// ------- pointer
+const pointer = { x: 0, y: 0 }, target = { x: 0, y: 0 };
+addEventListener('pointermove', (e) => {
+  target.x = (e.clientX / innerWidth) * 2 - 1;
+  target.y = (e.clientY / innerHeight) * 2 - 1;
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const clock = new THREE.Clock();
+function animate() {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  const t = clock.elapsedTime;
+
+  for (let i = 0; i < N; i++) {
+    const n = nodes[i];
+    n.p.addScaledVector(n.v, dt);
+    if (Math.abs(n.p.x) > BOUND.x) n.v.x *= -1;
+    if (Math.abs(n.p.y) > BOUND.y) n.v.y *= -1;
+    if (Math.abs(n.p.z) > BOUND.z) n.v.z *= -1;
+    nodePos[i * 3] = n.p.x; nodePos[i * 3 + 1] = n.p.y; nodePos[i * 3 + 2] = n.p.z;
+  }
+  nodeGeo.attributes.position.needsUpdate = true;
+
+  let f = 0;
+  for (let i = 0; i < N; i++) {
+    const a = nodes[i].p;
+    for (let j = i + 1; j < N; j++) {
+      const b = nodes[j].p;
+      const dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
+      const d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 < DIST2) {
+        linkPos[f] = a.x; linkPos[f + 1] = a.y; linkPos[f + 2] = a.z;
+        linkPos[f + 3] = b.x; linkPos[f + 4] = b.y; linkPos[f + 5] = b.z;
+        tmp.copy(colNear).lerp(colFar, Math.sqrt(d2) / DIST);
+        for (let k = 0; k < 6; k += 3) {
+          linkCol[f + k] = tmp.r; linkCol[f + k + 1] = tmp.g; linkCol[f + k + 2] = tmp.b;
+        }
+        f += 6;
+      }
+    }
+  }
+  linkGeo.setDrawRange(0, f / 3);
+  linkGeo.attributes.position.needsUpdate = true;
+  linkGeo.attributes.color.needsUpdate = true;
+  linkPos.fill(0, f); linkCol.fill(0, f);
+
+  world.rotation.y = t * 0.06;
+  pointer.x += (target.x - pointer.x) * 0.05;
+  pointer.y += (target.y - pointer.y) * 0.05;
+  camera.position.x = pointer.x * 30;
+  camera.position.y = -pointer.y * 18;
+  camera.lookAt(0, 0, 0);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(animate);
+}
+animate();
+</script>
+</body>
+</html>

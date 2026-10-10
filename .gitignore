@@ -1,0 +1,29 @@
+# --- OS junk --------------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# --- editor / IDE ---------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- logs and scratch -----------------------------------------------------
+*.log
+*.tmp
+temp/
+tmp/
+
+# --- node / npm ------------------------------------------------------------
+# The wallpapers ship a copy of three.js under each folder's lib/ on purpose,
+# so they run offline from file://. Nothing here should need npm.
+node_modules/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Each wallpaper folder has its own .gitignore for build leftovers.

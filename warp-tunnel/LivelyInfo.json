@@ -1,0 +1,14 @@
+{
+  "AppVersion": "1.0.0.0",
+  "Title": "Warp Tunnel (Three.js)",
+  "Thumbnail": "preview.png",
+  "Preview": "preview.png",
+  "Desc": "ネオンのリングをくぐり抜けるワープ・トンネル。色が流れ、パーティクルが前方から迫ります。",
+  "Author": "PC_User",
+  "License": "",
+  "Contact": "",
+  "Type": 1,
+  "FileName": "index.html",
+  "Arguments": null,
+  "IsAbsolutePath": false
+}

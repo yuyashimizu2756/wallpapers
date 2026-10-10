@@ -1,0 +1,14 @@
+{
+  "AppVersion": "1.0.0.0",
+  "Title": "Car Factory (Three.js)",
+  "Thumbnail": "preview.png",
+  "Preview": "preview.png",
+  "Desc": "自作の Three.js / WebGL 製ネオン車工場。ベルトコンベアとロボットアームが動きます。",
+  "Author": "PC_User",
+  "License": "",
+  "Contact": "",
+  "Type": 1,
+  "FileName": "index.html",
+  "Arguments": null,
+  "IsAbsolutePath": false
+}

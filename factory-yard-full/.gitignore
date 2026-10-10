@@ -1,0 +1,39 @@
+# --- generated build output ---------------------------------------------
+# This folder IS a `next build` export (the contents of `out/`), so most of it
+# is produced by the build. If you are versioning it, keep the files that make
+# the wallpaper work and ignore the noise a dev checkout leaves behind.
+
+# node / npm
+node_modules/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# next.js dev server leftovers. The exported site itself lives in `_next/`,
+# and that one IS needed at runtime — do not ignore it.
+.next/
+.vercel/
+
+# editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# local scratch
+*.log
+*.tmp
+temp/
+tmp/
+.cache/
+
+# anything you drop in while experimenting with viewpoints or themes
+# (uncomment if you keep experiments alongside the wallpaper)
+# experiments/

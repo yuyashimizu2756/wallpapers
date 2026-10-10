@@ -1,0 +1,14 @@
+{
+  "AppVersion": "1.0.0.0",
+  "Title": "Iso Harbour",
+  "Thumbnail": "preview.png",
+  "Preview": "preview.png",
+  "Desc": "アイソメ調の港町。ヘアラインで描いた工場・倉庫・埠頭・灯台が、4分周期の昼夜で暮れていきます。夜里は窓明かりと街灯が灯り、パレット全体が夜色に沈みます。コンベアを流れるパレット、フォークリフト、平板トラック、バン、貨物列車、ボートとカモメが動きます。OSのダーク/ライトに自動追従。URLに#dark / #light で固定も可。",
+  "Author": "PC_User",
+  "License": "",
+  "Contact": "",
+  "Type": 1,
+  "FileName": "index.html",
+  "Arguments": null,
+  "IsAbsolutePath": false
+}

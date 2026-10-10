@@ -1,0 +1,52 @@
+{
+  "viewpoint": {
+    "type": "dropdown",
+    "value": 0,
+    "text": "Viewpoint",
+    "help": "Which part of the town to look at. Panorama is the whole plate.",
+    "items": [
+      "Panorama",
+      "Factory",
+      "Warehouse",
+      "Shop",
+      "Town",
+      "Coast",
+      "Car Works",
+      "Sahel",
+      "Metro",
+      "Motors",
+      "Port",
+      "East",
+      "Village",
+      "Sky",
+      "Starbase"
+    ]
+  },
+  "zoom": {
+    "type": "slider",
+    "value": 100,
+    "min": 40,
+    "max": 400,
+    "tick": 1,
+    "text": "Zoom %",
+    "help": "How close in. Also set with the mouse wheel in a browser."
+  },
+  "panSpeed": {
+    "type": "slider",
+    "value": 100,
+    "min": 10,
+    "max": 300,
+    "tick": 1,
+    "text": "Pan speed %",
+    "help": "How fast the map slides when dragged, in a browser."
+  },
+  "rotateSpeed": {
+    "type": "slider",
+    "value": 55,
+    "min": 10,
+    "max": 200,
+    "tick": 1,
+    "text": "Rotate speed %",
+    "help": "How fast the plate turns on a middle or right drag, in a browser."
+  }
+}

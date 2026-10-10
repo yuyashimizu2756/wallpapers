@@ -1,0 +1,1081 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Factory Yard — Lively Wallpaper</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0c0d0e; }
+  #app { position: fixed; inset: 0; }
+  #app canvas { display: block; }
+  #cap {
+    position: fixed; left: 18px; bottom: 16px;
+    font: 12px/1.4 ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    letter-spacing: .16em; text-transform: uppercase; color: #868b8f;
+    pointer-events: none; user-select: none; white-space: pre;
+  }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="cap"></div>
+<script src="lib/three.min.js"></script>
+<script>
+/* ============================================================================
+   FACTORY YARD — a live isometric seaside town, as a Windows/Lively wallpaper.
+   Rebuilt for UMD three.js (r160); works over file://, no network access.
+   Faithful port of https://github.com/Khalidabdi1/factory (MIT):
+     · orthographic camera looking down (-1,-1,-1) → iso projection
+     · flat unlit faces (MeshBasicMaterial), every edge a 1px "hairline"
+     · colour tokens slide from the day theme into ONE night palette after dusk
+       (a day takes DAY_LEN seconds); lamps, windows and beacons light early
+   Iso kernel concept after ai-iso-skill, MIT © Tolga Cohce.
+   ============================================================================ */
+'use strict';
+
+/* ---- theme: OS preference, forced with #dark / #light ---- */
+const _forced = /dark/i.test(location.hash) ? true : (/light/i.test(location.hash) ? false : null);
+const _mq = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+let DARK = _forced !== null ? _forced : !!(_mq && _mq.matches);
+const NO_MOTION = !!(matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches);
+const TAU = Math.PI * 2;
+
+/* ---- palettes (token values from the factory site app/globals.css) ---- */
+const DAY = {
+  bg: DARK ? '#0c0d0e' : '#e9eaea',
+  line:   DARK ? '#3d4144' : '#8e9397',
+  detail: DARK ? '#2b2e30' : '#c3c6c8',
+  body:   DARK ? '#17181a' : '#ececeb',
+  deck:   DARK ? '#1b1d1f' : '#f3f3f2',
+  ground: DARK ? '#161719' : '#f0f0ef',
+  road:   DARK ? '#111213' : '#e6e7e7',
+  ko:     DARK ? '#d9dcde' : '#2a2c2e',
+  koDeck: DARK ? '#e9ebec' : '#3a3d40',
+  koLine: DARK ? '#5a5f63' : '#0c0d0e',
+  glass:  DARK ? '#0b0c0c' : '#e2e4e4',
+  live:   DARK ? '#f4f5f5' : '#0c0d0e',
+  sea:    DARK ? '#0f1112' : '#dde0e1',
+  sand:   DARK ? '#1c1d1f' : '#f7f7f5',
+  grass:  DARK ? '#141517' : '#e8e9e7',
+  snow:   DARK ? '#303336' : '#fbfbfa',
+  ink:    DARK ? '#868b8f' : '#6a6f73',
+  pageN:  DARK ? '#0a0b0b' : '#0c0d0e',
+};
+const NIGHT = {
+  ground: '#0e0f10', road: '#0a0b0b', body: '#111213', deck: '#141516',
+  kob: '#8c9093', kod: '#999da0', glass: '#08090a', livef: '#f4f5f5',
+  window: '#e9ebec', lamp: '#f4f5f5', sea: '#090a0b', sand: '#141516',
+  grass: '#0c0d0e', snow: '#232628', screen: '#e9ebec',
+  line: '#33373a', detail: '#202325', koline: '#3d4144', live: '#f4f5f5',
+  ink: '#70757a', paint: '#33373a',
+};
+const FILL_TOK = { ground: 'ground', road: 'road', body: 'body', deck: 'deck',
+  kob: 'ko', kod: 'koDeck', glass: 'glass', livef: 'live', window: 'glass',
+  lamp: 'deck', sea: 'sea', sand: 'sand', grass: 'grass', snow: 'snow', screen: 'ko' };
+const FILL_NIGHT = { ground: 'ground', road: 'road', body: 'body', deck: 'deck',
+  kob: 'kob', kod: 'kod', glass: 'glass', livef: 'livef', window: 'window',
+  lamp: 'lamp', sea: 'sea', sand: 'sand', grass: 'grass', snow: 'snow', screen: 'screen' };
+const LINE_TOK = { line: 'line', detail: 'detail', koline: 'koLine', live: 'live' };
+const LIT = new Set(['window', 'lamp', 'screen', 'livef', 'live']);
+
+/* ---- three setup ---- */
+const canvas = document.createElement('canvas');
+document.getElementById('app').appendChild(canvas);
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(DAY.bg);
+const cap = document.getElementById('cap');
+
+/* ---- iso kernel (skill coords: +x east/down-right, +y south/down-left, +z up) ---- */
+const W = (x, y, z = 0) => new THREE.Vector3(x, z, y);
+const v3 = (x, y, z) => new THREE.Vector3(x, y, z);
+const norm = pts => {
+  const n = new THREE.Vector3();
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i], b = pts[(i + 1) % pts.length];
+    n.x += (a.y - b.y) * (a.z + b.z);
+    n.y += (a.z - b.z) * (a.x + b.x);
+    n.z += (a.x - b.x) * (a.y + b.y);
+  }
+  return n.normalize();
+};
+const plane = (o, u, v) => {
+  const O = W(...o), U = W(...u), V = W(...v);
+  const n = new THREE.Vector3().crossVectors(U, V).normalize();
+  return new THREE.Matrix4().makeBasis(U, V, n).setPosition(O);
+};
+const TOP   = (x, y, z) => plane([x, y, z], [1, 0, 0], [0, 1, 0]);
+const FRONT = (x, y, z) => plane([x, y, z], [1, 0, 0], [0, 0, -1]);
+const SIDE  = (x, y, z) => plane([x, y, z], [0, -1, 0], [0, 0, -1]);
+/* FRONT geometry: local +v points DOWN (-z). Helpers that expect +v up: */
+const WALL = (x, y, z0) => FRONT(x, y, z0);   /* v = -(metres above z0) */
+
+/* ---- camera (site: ortho, ISO=(1,1,1).normalize(), 5000 away) ---- */
+const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 3400, 6600);
+const ISO = v3(1, 1, 1).normalize();
+const FRAME = [6, 436, -6, 330];
+let cur = null;
+function frame(w, h, box, zr) {
+  const target = W((box[0] + box[1]) / 2, (box[2] + box[3]) / 2, 0);
+  camera.position.copy(target).addScaledVector(ISO, 5000);
+  camera.lookAt(target); camera.updateMatrixWorld(true);
+  let minx = 1e9, maxx = -1e9, miny = 1e9, maxy = -1e9;
+  for (const x of [box[0], box[1]]) for (const y of [box[2], box[3]]) for (const z of zr) {
+    const q = W(x, y, z).applyMatrix4(camera.matrixWorldInverse);
+    if (q.x < minx) minx = q.x; if (q.x > maxx) maxx = q.x;
+    if (q.y < miny) miny = q.y; if (q.y > maxy) maxy = q.y;
+  }
+  const zoom = Math.min(w / (maxx - minx), h / (maxy - miny)) * 0.86;
+  const cx = (minx + maxx) / 2, cy = (miny + maxy) / 2;
+  const e = camera.matrixWorld.elements;
+  target.addScaledVector(v3(e[0], e[1], e[2]), -cx).addScaledVector(v3(e[4], e[5], e[6]), -cy);
+  return { zoom, target };
+}
+function resize() {
+  const w = innerWidth, h = innerHeight;
+  renderer.setSize(w, h);
+  camera.left = -w / 2; camera.right = w / 2; camera.top = h / 2; camera.bottom = -h / 2;
+  cur = frame(w, h, FRAME, [-4, 32]);
+  camera.zoom = cur.zoom;
+  camera.position.copy(cur.target).addScaledVector(ISO, 5000);
+  camera.lookAt(cur.target);
+  camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize);
+
+/* ---- materials & palette hop ---- */
+const FILLM = {}, LINEM = {}, TEXTM = [], EXTRA = [];
+const Cday = {}, Cnight = {};
+for (const k of Object.keys(FILL_TOK)) {
+  Cday[k] = new THREE.Color(DAY[FILL_TOK[k]]);
+  Cnight[k] = new THREE.Color(NIGHT[FILL_NIGHT[k]]);
+  FILLM[k] = new THREE.MeshBasicMaterial({ color: Cday[k], side: THREE.DoubleSide,
+    polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 });
+}
+for (const k of Object.keys(LINE_TOK)) {
+  Cday['l' + k] = new THREE.Color(DAY[LINE_TOK[k]]);
+  Cnight['l' + k] = new THREE.Color(NIGHT[LINE_TOK[k]]);
+  LINEM[k] = new THREE.LineBasicMaterial({ color: Cday['l' + k],
+    polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 });
+}
+Cday.ink = new THREE.Color(DAY.ink); Cnight.ink = new THREE.Color(NIGHT.ink);
+Cday.paint = new THREE.Color(DAY.koLine); Cnight.paint = new THREE.Color(NIGHT.paint);
+function shade(n) {
+  for (const k in FILLM) {
+    const lit = LIT.has(k) ? Math.min(1, n * 1.8) : n;
+    FILLM[k].color.copy(Cday[k]).lerp(Cnight[k], lit);
+  }
+  for (const k in LINEM) {
+    const lit = (k === 'live') ? Math.min(1, n * 1.8) : n;
+    LINEM[k].color.copy(Cday['l' + k]).lerp(Cnight['l' + k], lit);
+  }
+  for (const m of TEXTM) m.color.copy(Cday.ink).lerp(Cnight.ink, n);
+  for (const m of EXTRA) m.color.copy(m.userData.d).lerp(m.userData.n, m.userData.lit ? Math.min(1, n * 1.8) : n);
+  scene.background.copy(new THREE.Color(DAY.bg)).lerp(new THREE.Color(DAY.pageN), n);
+  cap.style.color = '#' + new THREE.Color(DAY.ink).lerp(new THREE.Color(NIGHT.ink), n).getHexString();
+}
+
+/* ---- part builder (port of the site kernel to plain three r160) ---- */
+const TONE = { n: ['body', 'deck', 'line'], k: ['kob', 'kod', 'koline'],
+  g: ['glass', 'glass', 'line'], gr: ['body', 'ground', 'line'], gs: ['body', 'grass', 'line'],
+  l: ['lamp', 'lamp', 'line'], w: ['window', 'window', 'line'], s: ['body', 'sand', 'line'],
+  nb: ['body', 'body', 'line'], kb: ['kob', 'kob', 'koline'] };
+const TEX_PX = 64;
+const FONT = '500 64px ui-monospace, "SF Mono", Menlo, Consolas, monospace';
+const mcol = m => new THREE.Vector3().setFromMatrixColumn(m, 2).normalize();
+
+class Part {
+  constructor() { this.fill = {}; this.lines = {}; this.texts = []; }
+  tri(k, a, b, c) { (this.fill[k] ??= []).push(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z); }
+  poly(k, pts) { for (let i = 0; i < pts.length - 2; i++) this.tri(k, pts[0], pts[i + 1], pts[i + 2]); }
+  seg(k, a, b) { (this.lines[k] ??= []).push(a.x, a.y, a.z, b.x, b.y, b.z); }
+  draw(m, segs, lift = 0.05) {
+    const off = mcol(m).multiplyScalar(lift);
+    const arr = this.lines.line ??= [];
+    const A = new THREE.Vector3(), B = new THREE.Vector3();
+    for (let i = 0; i < segs.length - 2; i += 2) {
+      A.set(segs[i], segs[i + 1], 0).applyMatrix4(m).add(off);
+      B.set(segs[i + 2], segs[i + 3], 0).applyMatrix4(m).add(off);
+      arr.push(A.x, A.y, A.z, B.x, B.y, B.z);
+    }
+    return this;
+  }
+  loop(m, segs, lift = 0.05) {
+    if (segs.length < 4) return this;
+    return this.draw(m, segs.concat(segs[0], segs[1]), lift);
+  }
+  rect2(m, x, y, w, h, k = 'line', lift = 0.05) {
+    return this.loop(m, [x, y, x + w, y, x + w, y + h, x, y + h], lift);
+  }
+  fill2(m, x, y, w, h, k = 'glass', lift = 0.03) {
+    const off = mcol(m).multiplyScalar(lift);
+    const quad = [[x, y], [x + w, y], [x + w, y + h], [x, y + h]]
+      .map(([u, v]) => new THREE.Vector3(u, v, 0).applyMatrix4(m).add(off));
+    this.poly(k, quad);
+    return this;
+  }
+  poly2(m, pts, k, lift = 0.03) {
+    const off = mcol(m).multiplyScalar(lift);
+    const ws = pts.map(([u, v]) => new THREE.Vector3(u, v, 0).applyMatrix4(m).add(off));
+    this.poly(k, ws);
+    return this;
+  }
+  face(pts, flood, deckk) {
+    const n = norm(pts);
+    if (n.y > 0.55) this.poly(deckk, pts);
+    else if (n.y > -0.82) this.poly(flood, pts);
+  }
+  ext(poly, e, tone = 'n') {
+    if (poly.length < 3) return this;
+    const t = TONE[tone], flood = t[0], deckk = t[1], lc = t[2];
+    const A = poly.map(p => W(p[0], p[1], p[2]));
+    const D = v3(e[0], e[2], e[1]);
+    const B = A.map(a => a.clone().add(D));
+    this.face(A, flood, deckk); this.face(B, flood, deckk);
+    for (let i = 0; i < A.length; i++) {
+      const j = (i + 1) % A.length;
+      this.face([A[i], A[j], B[j], B[i]], flood, deckk);
+      this.seg(lc, A[i], B[i]);
+    }
+    for (let i = 0; i < A.length; i++) { const j = (i + 1) % A.length; this.seg(lc, A[i], A[j]); }
+    for (let i = 0; i < B.length; i++) { const j = (i + 1) % B.length; this.seg(lc, B[i], B[j]); }
+    return this;
+  }
+  box(x, y, z, w, d, h, tone = 'n') {
+    const t = TONE[tone], flood = t[0], deckk = t[1], lc = t[2];
+    const x0 = x - w / 2, x1 = x + w / 2, y0 = y - d / 2, y1 = y + d / 2, z0 = z, z1 = z + h;
+    const c = [
+      [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1],
+      [x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0]
+    ].map(p => W(p[0], p[1], p[2]));
+    this.poly(deckk, [c[0], c[1], c[2], c[3]]);
+    this.poly(flood, [c[0], c[1], c[5], c[4]]);
+    this.poly(flood, [c[1], c[2], c[6], c[5]]);
+    this.poly(flood, [c[2], c[3], c[7], c[6]]);
+    this.poly(flood, [c[3], c[0], c[4], c[7]]);
+    for (let i = 0; i < 4; i++) {
+      const j = (i + 1) % 4;
+      this.seg(lc, c[i], c[j]); this.seg(lc, c[i + 4], c[j + 4]); this.seg(lc, c[i], c[i + 4]);
+    }
+    return this;
+  }
+  cylZ(x, y, z, r, h, segs, tone = 'n') {
+    const flood = TONE[tone][0], lc = TONE[tone][2];
+    const P = (a, zz) => W(x + Math.cos(a) * r, y + Math.sin(a) * r, z + zz);
+    for (let i = 0; i < segs; i++) {
+      const a = i / segs * TAU, b = (i + 1) / segs * TAU;
+      this.face([P(a, 0), P(b, 0), P(b, h), P(a, h)], flood, flood);
+    }
+    for (let i = 0; i < segs; i++) {
+      const a = i / segs * TAU, b = (i + 1) / segs * TAU;
+      this.seg(lc, P(a, 0), P(b, 0)); this.seg(lc, P(a, h), P(b, h));
+    }
+    return this;
+  }
+  cylY(x, y, z, r, w, segs, tone = 'nb') {
+    const flood = TONE[tone][0];
+    const P = (a, ss) => W(x + Math.cos(a) * r, y + ss, z + Math.sin(a) * r);
+    for (let i = 0; i < segs; i++) {
+      const a = i / segs * TAU, b = (i + 1) / segs * TAU;
+      this.face([P(a, -w / 2), P(b, -w / 2), P(b, w / 2), P(a, w / 2)], flood, flood);
+    }
+    for (let i = 0; i < segs; i++) {
+      const a = i / segs * TAU, b = (i + 1) / segs * TAU;
+      this.seg('line', P(a, -w / 2), P(b, -w / 2));
+    }
+    return this;
+  }
+  /* text on plane m (u,v); flip=true for wall planes so glyphs stand upright */
+  text(m, s, x, y, px, lift = 0.06, flip = false) {
+    const tc = document.createElement('canvas');
+    const tg = tc.getContext('2d');
+    tg.font = FONT;
+    const tw = Math.ceil(tg.measureText(s).width) + 8;
+    tc.width = tw; tc.height = TEX_PX;
+    tg.font = FONT; tg.fillStyle = '#fff'; tg.textBaseline = 'middle';
+    tg.fillText(s, 4, TEX_PX / 2);
+    const txt = new THREE.CanvasTexture(tc); txt.colorSpace = THREE.SRGBColorSpace;
+    const mat = new THREE.MeshBasicMaterial({ map: txt, transparent: true, depthWrite: false, color: DAY.ink });
+    const ph = new THREE.PlaneGeometry(px * tc.width / TEX_PX, px);
+    if (flip) ph.rotateX(Math.PI);
+    const off = mcol(m).multiplyScalar(lift);
+    ph.applyMatrix4(m); ph.translate(off.x, off.y, off.z);
+    const mesh = new THREE.Mesh(ph, mat); mesh.renderOrder = 3;
+    TEXTM.push(mat); this.texts.push(mesh);
+    return this;
+  }
+  build(name) {
+    const g = new THREE.Group(); g.name = name;
+    for (const k in this.fill) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(this.fill[k], 3));
+      g.add(new THREE.Mesh(geo, FILLM[k]));
+    }
+    for (const k in this.lines) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(this.lines[k], 3));
+      const l = new THREE.LineSegments(geo, LINEM[k]); l.renderOrder = 1;
+      g.add(l);
+    }
+    for (const t of this.texts) g.add(t);
+    return g;
+  }
+}
+
+/* ---- seeded rng + helpers ---- */
+function rng(seed) { let s = seed >>> 0; return () => (s = (s * 1664525 + 1013904223) >>> 0) / 4294967296; }
+const rand = rng(20261009);
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const ease = v => v * v * (3 - 2 * v);
+function polygonGeoTo(p, geo, m, fill = 'grass', line = 'detail') {
+  const g = geo.index ? geo.toNonIndexed() : geo;
+  const pos = g.getAttribute('position');
+  const v0 = new THREE.Vector3(), v1 = new THREE.Vector3(), v2 = new THREE.Vector3();
+  for (let i = 0; i < pos.count; i += 3) {
+    v0.fromBufferAttribute(pos, i).applyMatrix4(m);
+    v1.fromBufferAttribute(pos, i + 1).applyMatrix4(m);
+    v2.fromBufferAttribute(pos, i + 2).applyMatrix4(m);
+    p.tri(fill, v0, v1, v2);
+  }
+  const edges = new THREE.EdgesGeometry(g);
+  const ep = edges.getAttribute('position');
+  for (let i = 0; i < ep.count; i += 2) {
+    v0.fromBufferAttribute(ep, i).applyMatrix4(m);
+    v1.fromBufferAttribute(ep, i + 1).applyMatrix4(m);
+    p.seg(line, v0, v1);
+  }
+}
+const tree = (p, x, y, s = 1) => {
+  p.box(x - .22 * s, y - .22 * s, 0, .44 * s, .44 * s, 2.2 * s);
+  const m = new THREE.Matrix4().compose(W(x, y, 3.9 * s), new THREE.Quaternion(), v3(2 * s, 2.2 * s, 2 * s));
+  polygonGeoTo(p, new THREE.IcosahedronGeometry(1, 0), m);
+};
+const pine = (p, x, y, s = 1) => {
+  p.box(x - .15 * s, y - .15 * s, 0, .3 * s, .3 * s, 1.2 * s);
+  const m = new THREE.Matrix4().compose(W(x, y, 4.4 * s), new THREE.Quaternion(), v3(1.5 * s, 4.4 * s, 1.5 * s));
+  polygonGeoTo(p, new THREE.ConeGeometry(1, 1, 7), m);
+};
+function lampPost(p, x, y) {
+  p.box(x - .05, y - .05, 0, .1, .1, 3.85);
+  p.box(x - .22, y - .22, 3.85, .44, .44, .3, 'l');
+  p.seg('line', W(x - .2, y, 4.1), W(x + .2, y, 4.1));
+}
+function bench(p, x, y) {
+  p.box(x, y, .4, 1.2, .42, .12);
+  p.box(x - .5, y, .75, .14, .42, .5);
+  p.box(x + .5, y, .75, .14, .42, .5);
+  p.box(x - .5, y, .45, .14, .42, .12);
+  p.box(x + .5, y, .45, .14, .42, .12);
+}
+function palm(p, x, y) {
+  p.box(x - .14, y - .14, 0, .28, .28, 3.6);
+  const fr = [[-0.4, 0], [0.4, 0], [0, -.4], [0, .4], [.3, .3], [-.3, .3], [.3, -.3], [-.3, -.3]];
+  for (const [dx, dy] of fr) p.box(x + dx * 1.1, y + dy * 1.1, 3.55, 1.7, .3, .12, 's');
+}
+function pallet(p, x, y, z) {
+  p.box(x, y, z, 2.2, 2.2, .12, 'kb');
+  p.box(x - .8, y - .8, z, .9, .9, .5, 'k');
+  p.box(x + .8, y - .8, z, .9, .9, .5, 'k');
+  p.box(x - .8, y + .8, z, .9, .9, .5, 'k');
+  p.box(x + .8, y + .8, z, .9, .9, .5, 'k');
+}
+
+/* ============================================================================
+   THE SHEET — ground, sea, roads, yards, fences, hills
+   ============================================================================ */
+const CURB = .3, SEA_Z = -.6;
+function buildWorld() {
+  const p = new Part();
+  p.ext([[-200, -180, -4], [-200, 620, -4], [-200, 620, SEA_Z], [-200, 296, SEA_Z],
+    [-200, 289, 0], [-200, -180, 0]], [1000, 0, 0], 'gr');
+  p.poly('sand', [W(-200, 289, .05), W(800, 289, .05), W(800, 296, SEA_Z + .04), W(-200, 296, SEA_Z + .04)]);
+  p.fill2(TOP(-200, 279, .02), 0, 0, 1000, 10, 'sand', 0);
+  p.draw(TOP(0, 0, 0), [-200, 289, 800, 289], .1);
+  for (let i = 0; i < 90; i++) {
+    const x = rand() * 760 - 10, y = 281 + rand() * 13;
+    p.seg('detail', W(x, y, .06), W(x + .35, y + .18, .06));
+  }
+  p.fill2(TOP(-200, 296, SEA_Z), 0, 0, 1000, 324, 'sea', .02);
+  p.fill2(FRONT(-200, 620, SEA_Z), 0, 0, 1000, 3.4, 'sea');
+  p.fill2(SIDE(800, -180, SEA_Z), 0, 0, 800, 3.4, 'sea');
+  for (let i = 0; i < 60; i++) {
+    const x = 30 + rand() * 700, y = 310 + rand() * 280;
+    p.seg('detail', W(x, y, SEA_Z + .05), W(x + 4, y + 2, SEA_Z + .05));
+  }
+  const cols = [[12, 52], [66, 172], [186, 292], [306, 412], [426, 850]];
+  for (const [a, b] of cols) {
+    block(p, a, 142.6, b - a, 54.4);
+    block(p, a, 212.6, b - a, 46.4);
+  }
+  return p;
+}
+function block(p, x, y, w, d) {
+  p.ext([[x, y, 0], [x + w, y, 0], [x + w, y + d, 0], [x, y + d, 0]], [0, 0, CURB], 'gr');
+}
+
+function buildRoads() {
+  const p = new Part();
+  const road = (x, y, w, d) => p.fill2(TOP(x, y, 0), 0, 0, w, d, 'glass', .02);
+  const lanes = (x, y, w) => {
+    p.draw(TOP(0, 0, 0), [x, y, x + w, y], .06);
+    for (let i = 0; i < w / 6; i++) p.draw(TOP(0, 0, 0), [x + i * 6 + 1, y + .9, x + i * 6 + 3.4, y + .9], .07);
+  };
+  road(-220, 124, 1100, 14); lanes(-220, 130.2, 1000);
+  p.draw(TOP(0, 0, 0), [-220, 124, 880, 124], .09); p.draw(TOP(0, 0, 0), [-220, 138, 880, 138], .09);
+  road(-220, 198, 1100, 14); lanes(-220, 204.2, 900);
+  p.draw(TOP(0, 0, 0), [-220, 198, 880, 198], .09); p.draw(TOP(0, 0, 0), [-220, 212, 880, 212], .09);
+  road(-220, 260, 1100, 14); lanes(-220, 266, 900);
+  p.draw(TOP(0, 0, 0), [-220, 260, 880, 260], .09); p.draw(TOP(0, 0, 0), [-220, 274, 880, 274], .09);
+  for (const a of [60, 180, 300, 420]) {
+    road(a - 7, 138, 14, 136);
+    p.draw(TOP(0, 0, 0), [a - 7, 138, a - 7, 274], .05); p.draw(TOP(0, 0, 0), [a + 7, 138, a + 7, 274], .05);
+    for (let i = 0; i < 4; i++) p.fill2(TOP(a - 1.5, 260.6 + i * 1.2, 0), 0, 0, 3, 1.1, 'sand', .08);
+  }
+  return p;
+}
+
+function buildYards() {
+  const p = new Part();
+  p.fill2(TOP(2, 4, .02), 0, 0, 194, 114, 'road', 0);
+  p.fill2(TOP(14, 48, .02), .4, .4, 79.2, 35.2, 'ground', .005);
+  p.fill2(TOP(84.5, 44, .02), 0, 0, 65.3, 15.5, 'road', 0);
+  for (const sy of [72, 90]) {
+    p.fill2(TOP(134, sy, .04), 0, 0, 42, 10, 'deck', .02);
+    for (let i = 0; i < 7; i++) p.fill2(TOP(136.5 + i * 6, sy + 1.2, .02), 0, 0, 5.4, 3.4, 'road', .08);
+  }
+  p.text(TOP(0, 0, 0), 'STAGING A', 146, 90.6, 1.4);
+  p.text(TOP(0, 0, 0), 'STAGING B', 146, 72.6, 1.4);
+  p.fill2(TOP(28, 80, .04), 4.5, 0, 22, 11, 'deck', .02);
+  p.fill2(TOP(74, 80, .04), 0, 0, 22, 11, 'deck', .02);
+  p.text(TOP(0, 0, 0), 'BAY 1', 39, 83.2, 1.4);
+  p.text(TOP(0, 0, 0), 'BAY 2', 85, 83.2, 1.4);
+  p.fill2(TOP(106, 100, .04), 0, 0, 28, 14, 'deck', .02);
+  for (let i = 0; i < 3; i++) p.fill2(TOP(111 + i * 8, 102, .05), 0, 0, 3.2, 6.4, 'road', .09);
+  p.text(TOP(0, 0, 0), 'OUT', 117, 120.8, 1.6);
+  p.text(TOP(0, 0, 0), 'IN', 129, 120.8, 1.6);
+  p.fill2(TOP(124, 118, .02), 0, 0, 6, 5.5, 'road', 0);
+  p.fill2(TOP(136, 118.5, .02), 0, 0, 62, 5.5, 'road', 0);
+  p.text(TOP(0, 0, 0), 'TRUCKS', 167, 121.6, 1.6);
+  p.fill2(TOP(208, 14, .02), 0, 0, 148, 104, 'road', 0);
+  for (const dx of [232, 276]) {
+    p.fill2(TOP(dx, 80, .04), 4.5, 0, 22, 12, 'deck', .02);
+    p.fill2(TOP(dx + 3, 82, .06), 0, 0, 7.4, 3.6, 'road', .1);
+    p.text(TOP(0, 0, 0), 'DOCK ' + (dx === 232 ? 1 : 2), dx + 14, 84, 1.4);
+  }
+  p.fill2(TOP(228, 59, .04), 0, 0, 80, 3, 'deck', .02);
+  p.text(TOP(0, 0, 0), 'DELIVERIES', 232, 74, 1.4);
+  p.text(TOP(0, 0, 0), 'PICKING', 232, 52, 1.2);
+  p.text(TOP(0, 0, 0), 'PACKING', 250, 52, 1.2);
+  return p;
+}
+
+function fence(p, x, y, w, d, gaps = []) {
+  const x1 = x + w, y1 = y + d, posts = [];
+  for (let gx = x; gx <= x1; gx += 4.2) if (!(gx > gaps[0] && gx < gaps[1])) posts.push([gx, y]);
+  for (let gy = y + 4.2; gy <= y1; gy += 4.2) posts.push([x, gy]);
+  posts.push([x1, y]); posts.push([x1, y1]);
+  for (const [px, py] of posts) p.box(px, py, 0, .14, .14, 1.05);
+  p.loop(TOP(0, 0, 0), [x, y, x1, y, x1, y1, x, y1], .65);
+  p.loop(TOP(0, 0, 0), [x, y, x1, y, x1, y1, x, y1], .98);
+  if (gaps.length) {
+    const [ga, gb] = gaps;
+    p.loop(TOP(0, 0, 0), [ga - .6, y, ga + .6, y, ga + .6, y1, ga - .6, y1], .5);
+    p.loop(TOP(0, 0, 0), [gb - .6, y, gb + .6, y, gb + .6, y1, gb - .6, y1], .5);
+  }
+}
+function buildFences() {
+  const p = new Part();
+  fence(p, 2, 4, 194, 4); fence(p, 2, 4, 2, 114); fence(p, 2, 118, 194, 4, [112, 130]);
+  fence(p, 196, 4, 2, 114);
+  fence(p, 208, 14, 148, 4, [314, 332]); fence(p, 356, 14, 2, 104);
+  fence(p, 208, 14, 4, 104); fence(p, 208, 118, 148, 4, [314, 332]);
+  return p;
+}
+
+function buildHills() {
+  const p = new Part();
+  p.poly('ground', [W(-200, -4, 0), W(800, -4, 0), W(800, -70, 22), W(-200, -70, 22)]);
+  p.poly('ground', [W(-200, -70, 22), W(800, -70, 22), W(800, -88, 27), W(-200, -88, 27)]);
+  p.poly('body', [W(-200, -88, -4), W(800, -88, -4), W(800, -88, 27), W(-200, -88, 27)]);
+  p.poly('body', [W(-200, -70, 0), W(800, -70, 0), W(800, -88, 27), W(-200, -88, 27)]);
+  p.poly('snow', [W(-200, -66, 20.2), W(800, -66, 20.2), W(800, -74, 23.2), W(-200, -74, 23.2)]);
+  for (let i = 1; i < 5; i++) {
+    const z = i / 5 * 22, yy = -4 + (-66) * (i / 5);
+    p.draw(TOP(0, 0, 0), [-200, yy, 800, yy], z);
+  }
+  for (let x = -160; x < 780; x += 24) {
+    const yy = -8 - rand() * 46, s = .8 + rand() * .9;
+    pine(p, x + (rand() - .5) * 14, yy, s);
+  }
+  return p;
+}
+
+/* ============================================================================
+   INDUSTRY — Plant 01, conveyor, Warehouse 01 (cut open), gates
+   ============================================================================ */
+function buildFactory() {
+  const p = new Part();
+  p.box(54, 30, 0, 80, 36, 14);
+  for (let i = 0; i < 4; i++) {
+    const x0 = 14 + 20 * i;
+    p.ext([[x0, 12, 14], [x0 + 20, 12, 14], [x0 + 20, 12, 19]], [0, 36, 0], 'n');
+    const M = SIDE(x0 + 20, 30, 16.5);
+    p.fill2(M, -16.5, -2.5, 33, 5, 'window', .04);
+    for (let u = -16; u <= 16; u += 4) p.draw(M, [u, -2.5, u, 2.5], .07);
+    p.draw(M, [-16.5, -2.5, -16.5, 2.5], .07);
+    p.draw(M, [16.5, -2.5, 16.5, 2.5], .07);
+  }
+  const F = FRONT(54, 48, 14);
+  p.rect2(F, -40, .6, 80, 4.4);
+  p.text(F, 'PLANT 01', -25, 2.6, 2.6, .25, true);
+  for (let i = 0; i < 4; i++) p.fill2(FRONT(24 + i * 20, 48, 0), -6, -5, 12, 5, 'glass', .04);
+  p.cylZ(26, 22, 0, 1.2, 14.5, 12);
+  p.box(26, 22, 14.5, 2, 2, 1, 'nb');
+  p.box(26, 22, 15.6, 1.1, 1.1, .8, 'l');
+  p.box(105, 38, 0, 22, 20, 8);
+  const OF = FRONT(105, 48, 0);
+  p.fill2(OF, -8, -6.8, 16, 1.6, 'window', .04);
+  for (let i = 0; i < 4; i++) p.fill2(OF, -8 + i * 5.2, -3.2, 3.4, 1.6, 'window', .04);
+  p.text(OF, 'OFFICE', -4, -8.2, 1.5, .1, true);
+  for (const [fx, fy] of [[99, 42], [112, 42]]) {
+    p.cylZ(fx, fy, 8, .7, .8, 10);
+    p.box(fx, fy, 8.8, 1.7, 1.7, .15, 'nb');
+  }
+  return p;
+}
+
+function buildConveyor() {
+  const p = new Part();
+  for (let x = 84.5; x <= 149.5; x += 6) {
+    p.box(x, 57.9, 0, .2, .2, 1.0);
+    p.box(x, 48, 0, .2, .2, 1.0);
+  }
+  p.box(116, 53.7, .3, 65.4, .5, .3);
+  p.fill2(TOP(84.5, 56.75, 1.0), 0, 0, 65.4, 2.5, 'deck', .02);
+  p.draw(TOP(84.5, 56.75, 1.0), [0, 0, 65.4, 0], .4);
+  p.draw(TOP(84.5, 56.75, 1.0), [0, 2.5, 65.4, 2.5], .4);
+  for (let i = 0; i < 54; i++) {
+    const u = 86 + i * .9;
+    p.seg('detail', W(u, 57.9, 1.06), W(u, 58.6, 1.06));
+  }
+  p.box(149.8, 58.1, 1.0, .2, 2.5, 1.15, 'nb');
+  return p;
+}
+
+function buildWarehouse() {
+  const p = new Part();
+  const X0 = 228, X1 = 308, Y0 = 14, Y1 = 58, H = 10, RZ = 13.5, RY = 36;
+  p.fill2(TOP(X0, Y0, .02), 0, 0, X1 - X0, Y1 - Y0, 'deck', .01);
+  p.ext([[X0, Y1, 0], [X1, Y1, 0]], [0, 0, 1.7], 'n');
+  p.draw(TOP(X0, Y1, 1.7), [0, 0, X1 - X0, 0], .06);
+  for (let x = X0; x < X1; x += 2) p.draw(TOP(x, Y1, 1.7), [0, 0, .9, .9], .08);
+  p.box(X0, 36, 0, 1, 44, 10);
+  p.box(X1, 36, 0, 1, 44, 10);
+  p.box(268, Y0, 0, 80, 1, 10);
+  p.seg('line', W(X0, Y1, 0), W(X1, Y1, 0));
+  p.seg('line', W(268, Y1, RZ), W(268, Y0 + 1, RZ));
+  for (let x = X0 + 8; x < X1; x += 16) {
+    const yv = 22 + (x / (X1 - X0)) * 20;
+    p.poly2(FRONT(x, yv, 0), [[-24, 0], [24, 0], [0, -13.5]], 'body', .02);
+    p.draw(FRONT(x, yv, 0), [-24, 0, 24, 0], .04);
+    p.draw(FRONT(x, yv, 0), [0, -13.5, -24, 0], .04);
+    p.draw(FRONT(x, yv, 0), [0, -13.5, 24, 0], .04);
+  }
+  for (let r = 0; r < 2; r++) {
+    const ry = r === 0 ? 28.4 : 31.6;
+    for (let b = 0; b < 8; b++) {
+      const rb = 243 + b * 6;
+      p.box(rb, ry, 0, .18, .6, 9.6, 'nb');
+      for (const lv of [2.85, 5.85, 8.45]) {
+        p.box(240.5 + b * 6, ry, lv, 5.1, .35, .22, 'nb');
+        p.seg('koline', W(rb - 2.6, ry - .3, lv + .6), W(rb + 2.6, ry - .3, lv + .6));
+      }
+    }
+    p.draw(TOP(240, ry, .2), [0, 0, 48, 0], .7);
+  }
+  for (const [rb, ry, lv] of [[246, 29.65, 2.85], [252, 29.65, 2.85], [258, 29.65, 2.85],
+    [246, 29.65, 5.85], [252, 29.65, 5.85], [264, 29.65, 5.85], [270, 29.65, 5.85],
+    [258, 29.65, 8.45], [270, 29.65, 8.45], [288, 29.65, 2.85], [294, 29.65, 2.85], [294, 29.65, 5.85],
+    [247, 32.85, 2.85], [253, 32.85, 2.85], [265, 32.85, 2.85], [247, 32.85, 5.85],
+    [259, 32.85, 5.85], [271, 32.85, 5.85], [283, 32.85, 5.85], [271, 32.85, 8.45]])
+    pallet(p, rb, ry, lv);
+  p.box(232, 22, 0, 4, 8, 2.2, 'nb');
+  for (let i = 0; i < 3; i++) pallet(p, 236 + i * 1.6, 18, 1.3);
+  p.box(250, 20, 0, 1.6, 1.6, 3.2, 'nb');
+  p.box(247, 18, 0, 4.4, 4, .6, 'nb');
+  p.box(300, 30, 0, 2, 24, 3, 'g');
+  p.box(302, 24, 0, 2.4, 3, 1.2, 'nb');
+  const S = FRONT(268, Y1, 1.7);
+  p.rect2(S, -26, .2, 52, 1.3);
+  p.text(S, 'WAREHOUSE 01', -24, .8, 1.2, .16, true);
+  return p;
+}
+
+function buildGate() {
+  const p = new Part();
+  for (const gx of [112, 130]) p.box(gx, 122, 0, .5, .5, 3.2);
+  p.box(96, 116, 0, 3, 3.2, 2.3);
+  const BF = FRONT(96, 117.6, 0);
+  p.fill2(BF, .4, -2.2, 2.2, 1.6, 'window', .04);
+  for (const gx of [114, 128.5]) {
+    p.box(gx, 122, .3, 1, 1, .18, 'nb');
+    p.box(gx + 9, 122, .3, 9, 1, .18, 'nb');
+  }
+  for (const gx of [314, 332]) p.box(gx, 66, 0, .5, .5, 3.2);
+  p.box(323, 66, 0, 3, 3.2, 2.3);
+  p.text(FRONT(323, 64.4, 0), 'GATE', .3, -1.4, 1.3, .1, true);
+  return p;
+}
+
+/* ============================================================================
+   TOWN — flats, shop, houses, park, civic hall with a working clock
+   ============================================================================ */
+function flats(p, x, y, w, d, h) {
+  p.box(x, y, 0, w, d, h, 'n');
+  const floors = Math.floor(h / 2.9);
+  for (let i = 0; i < floors; i++) {
+    const z = h - .5 - i * 2.9;
+    for (let j = 0; j < Math.floor(w / 3); j++)
+      p.fill2(FRONT(x, y + d / 2, 0), -w / 2 + 1 + j * 3, -z, 2, 1.5, 'window', .04);
+  }
+  const F = FRONT(x, y + d / 2, 0);
+  p.text(F, 'FLATS', 0, -(h - 1.2), 1.4, .08, true);
+  p.draw(F, [-w / 2, -h + .4, w / 2, -h + .4], .06);
+  p.draw(F, [-w / 2, -0.4, w / 2, -0.4], .06);
+}
+function shop(p, x, y, w, d, h) {
+  p.box(x, y, 0, w, d, h, 'n');
+  const F = FRONT(x, y + d / 2, 0);
+  p.fill2(F, -w / 2 + 2, -(h - .5), w - 6, h - .5, 'glass', .04);
+  p.draw(F, [-w / 2 + 2, -(h - .5), w / 2 - 4, -(h - .5)], .07);
+  p.box(x, y + d / 2 - .4, h - .5, w + 1.2, 2.6, .5, 'kb');
+  p.text(F, 'SHOP', 0, -(h - .2), 1.6, .08, true);
+}
+function house(p, x, y, w, d, h) {
+  p.box(x, y, 0, w, d, h, 'n');
+  p.ext([[x - w / 2, y, h], [x - w / 2, y, h + 1.4], [x, y, h + 3], [x + w / 2, y, h + 1.4], [x + w / 2, y, h]], [0, d, 0], 'n');
+  const F = FRONT(x, y + d / 2, 0);
+  p.fill2(F, -w / 2 + 2, -4, 2, 3, 'window', .04);
+  p.fill2(F, -1.4, -3.4, 2.4, 3.4, 'body', .06);
+  p.fill2(F, w / 2 - 4, -4, 2, 3, 'window', .04);
+  p.rect2(F, -1.4, -3.4, 2.4, 3.4);
+  p.box(x + w / 2 - 2.4, y - d / 2, h + 1.2, 1, 1, 2.6, 'nb');
+}
+function civicHall(p, x, y, w, d, h) {
+  p.box(x, y, 0, w, d, h, 'n');
+  const F = FRONT(x, y + d / 2, 0);
+  p.draw(F, [-w / 2, -0.4, w / 2, -0.4], .08);
+  for (let i = 0; i < 3; i++) p.fill2(F, -w / 2 + 2 + i * 8, -6, 6, 4, 'glass', .04);
+  p.text(F, 'TOWN HALL', 0, -(h - .2), 1.4, .08, true);
+  p.box(x, y + d / 2, h, w / 4, 3.4, 6);
+  p.rect2(FRONT(x, y + d / 2, h + 1), -w / 8, 0, w / 4, 2.2);
+}
+function buildClock(px, py, pz, radius) {
+  const g = new THREE.Group();
+  g.position.set(px, pz, py);
+  g.quaternion.setFromUnitVectors(v3(0, 0, 1), v3(0, 1, 0));
+  const rim = new THREE.LineLoop(
+    new THREE.BufferGeometry().setFromPoints(
+      Array.from({ length: 32 }, (_, i) => {
+        const a = i / 32 * TAU;
+        return v3(Math.cos(a) * radius, Math.sin(a) * radius, 0);
+      })), LINEM.line);
+  rim.renderOrder = 1;
+  g.add(rim);
+  const dm = new THREE.Mesh(new THREE.CircleGeometry(radius, 32), FILLM.deck);
+  g.add(dm);
+  const handMat = new THREE.MeshBasicMaterial({ color: DAY.line, side: THREE.DoubleSide });
+  handMat.userData = { d: new THREE.Color(DAY.line), n: new THREE.Color(NIGHT.line), lit: true };
+  EXTRA.push(handMat);
+  const mk = (len, w) => {
+    const hr = new THREE.Group();
+    const bar = new THREE.Mesh(new THREE.PlaneGeometry(w, len), handMat);
+    bar.geometry.translate(0, len / 2, 0);
+    hr.add(bar);
+    return hr;
+  };
+  const hh = mk(radius * .55, .14);
+  const minG = mk(radius * .8, .1);
+  g.add(hh); g.add(minG);
+  g.userData = { hh, minG };
+  return g;
+}
+
+/* ============================================================================
+   COAST & SEA — promenade, pier, lighthouse (beaming at night), boats
+   ============================================================================ */
+function buildCoast() {
+  const p = new Part();
+  p.fill2(TOP(-10, 276.4, .02), 0, 0, 300, 3.2, 'deck', 0);
+  for (let x = 8; x < 300; x += 14) lampPost(p, x, 275);
+  for (let x = 8; x < 300; x += 30) palm(p, x + 6, 277.5);
+  for (let x = 12; x < 280; x += 40) bench(p, x, 275);
+  for (const [ux, uy] of [[48, 287], [96, 285], [150, 288], [205, 286], [255, 288], [330, 284], [380, 287]]) {
+    p.box(ux, uy, 0, .12, .12, 1.5, 'nb');
+    p.ext([[ux - 1, uy, 1.5], [ux, uy, 2.4], [ux + 1, uy, 1.5]], [0, 1.4, 0], 'kb');
+  }
+  p.box(372, 288, 0, 3, 3, 3.4, 'n');
+  p.box(372, 289, 3.4, 2.6, 1.6, .6, 'nb');
+  p.box(330, 308, 0, 48, 6, .8, 'n');
+  p.box(330, 314, .8, 48, 1, 1.2, 'nb');
+  for (let x = 307; x < 354; x += 6) p.box(x, 314, 0, .3, .3, .8);
+  lampPost(p, 330, 312); bench(p, 318, 313); bench(p, 342, 313);
+  for (const [rx, ry, rs] of [[394, 306, 1.4], [402, 300, 2], [410, 305, 1.2], [398, 312, 1.6], [408, 312, 1]]) {
+    const m = new THREE.Matrix4().compose(W(rx, ry, 0), new THREE.Quaternion(), v3(rs, rs, rs));
+    polygonGeoTo(p, new THREE.IcosahedronGeometry(1, 0), m, 'body', 'detail');
+  }
+  return p;
+}
+function buildLighthouse() {
+  const g = new THREE.Group();
+  const p = new Part();
+  p.cylZ(402, 312.9, 0, 2.2, 16, 12, 'n');
+  p.box(402, 312.9, 16, 4.4, 4.4, 1.2, 'nb');
+  p.cylZ(402, 312.9, 17.2, 1.2, 2.4, 12, 'l');
+  p.box(402, 312.9, 19.6, 3.4, 3.4, .7, 'nb');
+  g.add(p.build('lighthouse'));
+  const beam = new THREE.Group();
+  const bm = new THREE.Mesh(new THREE.ConeGeometry(1, 26, 4),
+    new THREE.MeshBasicMaterial({ color: DAY.live, transparent: true, opacity: .18,
+      side: THREE.DoubleSide, depthWrite: false, depthTest: true }));
+  bm.rotation.y = Math.PI / 2;
+  bm.geometry.translate(13, 0, 0);
+  beam.add(bm);
+  beam.position.set(402, 18.6, 312.9);
+  g.add(beam);
+  g.userData = { beam, mat: bm.material };
+  return g;
+}
+function makeBoat(kind) {
+  const p = new Part();
+  if (kind === 'sail') {
+    p.box(0, 0, 0, 4.2, 1.6, 1.1, 's');
+    p.box(0, .7, .4, .5, .5, .8, 'nb');
+    p.box(.5, .6, .9, .14, .14, 2.8, 'nb');
+    p.fill2(SIDE(1, 0, 3), -1.1, 0, 2.2, 2.8, 'kb', .02);
+  } else {
+    p.box(0, 0, 0, 4.6, 1.8, .9, 'n');
+    p.box(-.6, .6, .6, 2.2, 1, .8, 'kb');
+  }
+  return p.build(kind);
+}
+
+/* ============================================================================
+   VEHICLES & PEOPLE (models face +x; pose = position (x,z,y))
+   ============================================================================ */
+function buildVan() {
+  const p = new Part();
+  p.box(-1.2, 0, .55, 1.2, 1.7, 1.45);
+  p.box(-5.6, 0, .55, 4.4, 1.7, 1.9);
+  p.fill2(FRONT(-1.2, .85, .5), -0.6, -1.4, 1.2, .8, 'window', .03);
+  p.fill2(SIDE(0, 0, .5), -0.5, -1.0, 1, 1.0, 'window', .03);
+  for (const wy of [1.25, -1.95]) p.cylY(0, wy, .62, .5, .4, 10);
+  for (const wy of [1.25, -1.95]) p.cylY(-5.6, wy, .62, .5, .4, 10);
+  p.box(-.1, 1.1, .75, .4, .4, .35, 'l');
+  p.box(-.1, -1.1, .75, .4, .4, .35, 'l');
+  return p.build('van');
+}
+function buildCar() {
+  const p = new Part();
+  p.box(-.2, 0, .3, 3.4, 1.5, .55);
+  p.box(-1.6, 0, .85, 2.2, 1.35, .6, 'g');
+  p.box(-.3, 0, .85, 1, 1.3, .5);
+  for (const wy of [1.15, -1.15]) { p.cylY(-.1, wy, .5, .42, .36, 10); p.cylY(-2.9, wy, .5, .42, .36, 10); }
+  p.box(-.05, 1.1, .7, .34, .42, .28, 'l');
+  p.box(-.05, -1.1, .7, .34, .42, .28, 'l');
+  return p.build('car');
+}
+function buildForklift() {
+  const p = new Part();
+  p.box(0, 0, .4, 1.7, 1.2, .55);
+  p.box(0, 0, .95, 1.1, 1.2, 1.3);
+  p.box(1.5, 0, .55, .9, 1.2, 1.9, 'nb');
+  p.box(.3, .5, .55, 3, .44, .12, 'nb');
+  for (const wy of [1.05, -1.05]) { p.cylY(1.7, wy, .4, .45, .36, 10); p.cylY(-1.5, wy, .4, .45, .36, 10); }
+  return p.build('fork');
+}
+function buildSemi() {
+  const g = new THREE.Group();
+  const t = new Part();
+  t.box(-1.2, 0, .45, 2.2, 1.6, 1.1);
+  t.box(-.6, 0, 1.55, 1.9, 1.6, 1.6);
+  t.box(-.9, 0, 1.55, .6, 1.6, 1.7);
+  for (const wy of [1.05, -1.05]) { t.cylY(0, wy, .5, .5, .42, 10); t.cylY(-2.4, wy, .5, .5, .42, 10); }
+  g.add(t.build('tractor'));
+  const tr = new Part();
+  tr.box(-9.5, 0, .75, 3, 2.2, .4);
+  tr.box(-9.5, 0, 1.15, 12, 2.2, 1.1);
+  tr.box(-9.5, 0, 2.1, 12, 2.2, 2.2);
+  for (let i = 0; i < 3; i++) for (const wy of [1.05, -1.05]) t.cylY(-2.6 - i * 3, wy, .5, .5, .42, 10);
+  g.add(tr.build('trailer'));
+  return g;
+}
+function buildPerson() {
+  const p = new Part();
+  p.box(-.1, -.16, 0, .2, .32, .95, 'nb');
+  p.box(-.14, -.34, .95, .28, .68, .5, 'nb');
+  p.box(-.09, -.1, 1.45, .18, .2, .22, 'nb');
+  return p.build('person');
+}
+function flatbed(x, y) {
+  const p = new Part();
+  p.box(x + 5.5, y, 1.05, 11, 2.2, .35, 'n');
+  p.box(x + 5.5, y, .4, 11, 2.2, .3, 'nb');
+  for (let i = 0; i < 3; i++) for (const wy of [1.15, -1.15]) p.cylY(x + 1 + i * 5.5, wy, .55, .5, .45, 10);
+  for (const px of [x + 1.4, x + 5.5]) for (const py of [y - .4, y + .4]) pallet(p, px, py, 1.42);
+  return p.build('flat');
+}
+
+/* ---- time ---- */
+const DAY_LEN = 300;   /* a day passes in 5 minutes */
+const START_H = 8;
+const hourAt = t => (((START_H + t * 24 / DAY_LEN) % 24) + 24) % 24;
+const nightOf = h => h < 5 ? 1 : h < 7 ? 1 - ease((h - 5) / 2) : h < 18.5 ? 0 : h < 20.5 ? ease((h - 18.5) / 2) : 1;
+
+/* ============================================================================
+   ASSEMBLE THE SCENE
+   ============================================================================ */
+const world = new THREE.Group();
+world.add(buildWorld().build('world'));
+world.add(buildHills().build('hills'));
+world.add(buildRoads().build('roads'));
+world.add(buildYards().build('yards'));
+world.add(buildFences().build('fences'));
+world.add(buildFactory().build('factory'));
+world.add(buildConveyor().build('conveyor'));
+world.add(buildWarehouse().build('warehouse'));
+world.add(buildGate().build('gate'));
+
+const tp = new Part();
+flats(tp, 36, 150, 24, 20, 14);
+flats(tp, 120, 154, 26, 20, 11);
+flats(tp, 260, 152, 22, 20, 9);
+shop(tp, 132, 216, 24, 12, 6);
+house(tp, 330, 189, 14, 12, 6);
+house(tp, 362, 187, 14, 12, 6);
+house(tp, 396, 189, 14, 12, 6);
+house(tp, 316, 222, 14, 12, 6);
+house(tp, 348, 220, 14, 12, 6);
+house(tp, 380, 222, 14, 12, 6);
+tp.fill2(TOP(18, 156, .05), 0, 0, 26, 32, 'grass', 0);
+tp.fill2(TOP(26, 164, .08), 0, 0, 8, 10, 'deck', .02);
+tp.loop(TOP(26, 164, .08), [0, 0, 8, 0, 8, 10, 0, 10], .1);
+world.add(tp.build('town'));
+
+const hall = new THREE.Group();
+const hp = new Part();
+civicHall(hp, 0, 0, 0, 40, 20, 6);
+hall.add(hp.build('hall'));
+const clockG = buildClock(0, 11, 8, 1.6);
+hall.add(clockG);
+hall.position.set(330, 0, 174);
+world.add(hall);
+
+world.add(buildCoast().build('coast'));
+const lighthouse = buildLighthouse(); world.add(lighthouse);
+const boatA = makeBoat('sail'); boatA.scale.setScalar(1.1); boatA.position.set(150, 0, 316); world.add(boatA);
+const boatB = makeBoat('motor'); boatB.position.set(336, 0, 320); world.add(boatB);
+
+const lp = new Part();
+for (let x = 0; x < 460; x += 26) { lampPost(lp, x, 122.5); lampPost(lp, x, 139.5); }
+world.add(lp.build('lamps'));
+
+const treeP = new Part();
+for (let x = 30; x < 440; x += 56) { tree(treeP, x, 213); tree(treeP, x + 20, 259); }
+for (const [tx, ty] of [[24, 156], [40, 188], [230, 240], [262, 252], [360, 186], [298, 240]])
+  tree(treeP, tx, ty);
+world.add(treeP.build('trees'));
+
+world.add(flatbed(74, 80));
+world.add(flatbed(232, 80));
+world.add(flatbed(276, 80));
+const semi = buildSemi(); world.add(semi);
+const vanE = buildVan(), vanW = buildVan(); world.add(vanE); world.add(vanW);
+const carM = buildCar(), carC = buildCar(); world.add(carM); world.add(carC);
+const forkA = buildForklift(), forkB = buildForklift(); world.add(forkA); world.add(forkB);
+const palA = new Part(); pallet(palA, 0, 0, 0); const palAm = palA.build('pA'); palAm.visible = false; world.add(palAm);
+const palB = new Part(); pallet(palB, 0, 0, 0); const palBm = palB.build('pB'); palBm.visible = false; world.add(palBm);
+
+const beltParts = [0, .33, .66].map(ph => {
+  const pp = new Part(); pallet(pp, 0, 0, 0);
+  return { ph, mesh: pp.build('beltPallet') };
+});
+for (const bp of beltParts) world.add(bp.mesh);
+
+const personProto = buildPerson();
+const guardA = personProto.clone(), guardB = personProto.clone();
+const walker1 = personProto.clone(), walker2 = personProto.clone();
+for (const g of [guardA, guardB, walker1, walker2]) world.add(g);
+
+for (let i = 0; i < 3; i++) {
+  const c = buildCar();
+  c.position.set(112 + i * 8, 0, 104);
+  c.rotation.y = Math.PI / 2;
+  world.add(c);
+}
+
+scene.add(world);
+
+/* ============================================================================
+   HEARTBEAT
+   ============================================================================ */
+let t = 0;
+const lerpPt = (a, b, u) => [a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u];
+
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(1 / 20, 1 / 60);
+  t += dt;
+  const h = hourAt(t), n = nightOf(h);
+  shade(n);
+  const light = Math.min(1, n * 1.8);
+
+  for (let i = 0; i < beltParts.length; i++) {
+    const bp = beltParts[i];
+    bp.u = (bp.u + dt * .85 / 62) % 1;
+    bp.mesh.position.set(86 + bp.u * 62, 0, 57.9);
+    bp.mesh.position.y = 1.38;
+  }
+
+  const vl = 445 + 160;
+  vanE.position.set((t * 8) % vl, 0, 134.5); vanE.rotation.y = 0;
+  vanW.position.set(vl - (t * 7) % vl, 0, 127.5); vanW.rotation.y = Math.PI;
+  carM.position.set(60 + (t * 4.5) % 250, 0, 204.5); carM.rotation.y = 0;
+  carC.position.set(700 - (t * 3.5) % 340, 0, 264); carC.rotation.y = Math.PI;
+
+  semis(dt);
+  forks(dt);
+
+  guardA.position.set(96.5, 0, 116.6); guardA.rotation.y = Math.PI / 2;
+  guardB.position.set(323, 0, 66.6); guardB.rotation.y = -Math.PI / 2;
+  walker1.position.set(318 + Math.sin(t * .5) * 2, Math.abs(Math.sin(t * 1.2)) * .04, 261.5);
+  walker2.position.set(120 + Math.sin(t * .4) * 3, Math.abs(Math.sin(t)) * .04, 274.5);
+
+  boatA.position.y = Math.sin(t * .6) * .25;
+  boatA.rotation.y = Math.sin(t * .3) * .08 - Math.PI / 2;
+  boatB.position.y = Math.sin(t * .8) * .14;
+  boatB.rotation.y = Math.PI / 2.6;
+
+  lighthouse.userData.beam.rotation.y = -t * .9;
+  lighthouse.userData.mat.opacity = .01 + .16 * light;
+
+  const { hh, minG } = clockG.userData;
+  hh.rotation.z = Math.PI + (h % 12) / 12 * TAU;
+  minG.rotation.z = Math.PI + (h % 1) * TAU;
+
+  if (cur && !NO_MOTION) {
+    const tgt = cur.target.clone();
+    tgt.x += Math.sin(t / 34) * 6;
+    tgt.z += Math.cos(t / 23) * 4;
+    camera.position.copy(tgt).addScaledVector(ISO, 5000);
+    camera.lookAt(tgt);
+    camera.zoom = cur.zoom * (1 + .008 * Math.sin(t / 11));
+    camera.updateProjectionMatrix();
+  }
+
+  cap.textContent = 'FACTORY YARD · ' +
+    String(Math.floor(h)).padStart(2, '0') + ':' + String(Math.floor((h % 1) * 60)).padStart(2, '0') +
+    '  ·  click: +6h  ·  theme: ' + (DARK ? 'dark' : 'light');
+
+  renderer.render(scene, camera);
+}
+
+/* ---- semi truck route: W approach → lay-by → gate → BAY 1 → leave E ---- */
+const SEMI_PTS = [
+  [-250, 127.5, 0], [115, 127.5, 2], [115, 123.5, 0], [110, 116, 0],
+  [103, 105, 0], [80, 88, 0], [54, 86, 0], [34, 86, 12],
+  [54, 88, 0], [80, 90, 0], [103, 107, 0], [113, 118, 0],
+  [118, 125, 0], [124, 132, 0], [170, 134.5, 0], [560, 134.5, 8],
+];
+let semiI = 0, semiHold = 0;
+function semis(dt) {
+  if (semiHold > 0) { semiHold -= dt; return; }
+  const a = SEMI_PTS[semiI], b = SEMI_PTS[Math.min(semiI + 1, SEMI_PTS.length - 1)];
+  const dx = b[0] - a[0], dy = b[1] - a[1];
+  const d = Math.hypot(dx, dy);
+  if (d < .01) {
+    if (a[2]) semiHold = a[2];
+    semiI++;
+    if (semiI >= SEMI_PTS.length - 1) semiI = 0;
+    return;
+  }
+  const s = (semiI < 7 ? 7 : 10) * dt;
+  const f = Math.min(1, s / d);
+  semi.position.x = a[0] + dx * f;
+  semi.position.z = a[1] + dy * f;
+  semi.rotation.y = -Math.atan2(dy, dx);
+  if (f >= 1) {
+    if (a[2]) semiHold = a[2];
+    semiI++;
+    if (semiI >= SEMI_PTS.length - 1) semiI = 0;
+  }
+}
+
+/* ---- forklifts ---- */
+function forks(dt) {
+  const cycA = 24, phA = (t % cycA) / cycA;
+  const FA0 = [134, 74], FA1 = [33, 86];
+  if (phA < .45) {
+    const u = ease(phA / .45);
+    const q = lerpPt(FA0, FA1, u);
+    forkA.position.x = q[0]; forkA.position.z = q[1];
+    forkA.rotation.y = -Math.atan2(FA1[1] - FA0[1], FA1[0] - FA0[0]);
+    palAm.visible = true;
+    palAm.position.x = forkA.position.x - .9; palAm.position.z = forkA.position.z;
+    palAm.position.y = 2.4;
+  } else if (phA < .62) {
+    forkA.position.x = FA1[0]; forkA.position.z = FA1[1];
+    forkA.rotation.y = -Math.atan2(FA1[1] - FA0[1], FA1[0] - FA0[0]);
+    palAm.visible = true;
+    palAm.position.x = forkA.position.x - .9; palAm.position.z = forkA.position.z;
+    palAm.position.y = 2.4 - ease((phA - .45) / .17) * 1.9;
+  } else {
+    const u = ease((phA - .62) / .38);
+    const q = lerpPt(FA1, FA0, u);
+    forkA.position.x = q[0]; forkA.position.z = q[1];
+    forkA.rotation.y = -Math.atan2(FA1[1] - FA0[1], FA1[0] - FA0[0]);
+    palAm.visible = false;
+  }
+  const cycB = 26, phB = (t % cycB) / cycB;
+  const FB0 = [244, 30], FB1 = [232, 76];
+  if (phB < .4) {
+    const u = ease(phB / .4);
+    const q = lerpPt(FB0, FB1, u);
+    forkB.position.x = q[0]; forkB.position.z = q[1];
+    forkB.rotation.y = -Math.atan2(FB1[1] - FB0[1], FB1[0] - FB0[0]);
+    palBm.visible = true;
+    palBm.position.x = forkB.position.x - .9; palBm.position.z = forkB.position.z;
+    palBm.position.y = 2.5;
+  } else if (phB < .6) {
+    forkB.position.x = FB1[0]; forkB.position.z = FB1[1];
+    forkB.rotation.y = -Math.atan2(FB1[1] - FB0[1], FB1[0] - FB0[0]);
+    palBm.visible = true;
+    palBm.position.x = forkB.position.x - .9; palBm.position.z = forkB.position.z;
+    palBm.position.y = 2.5 - ease((phB - .4) / .2) * 2.0;
+  } else {
+    const u = ease((phB - .6) / .4);
+    const q = lerpPt(FB1, FB0, u);
+    forkB.position.x = q[0]; forkB.position.z = q[1];
+    forkB.rotation.y = -Math.atan2(FB1[1] - FB0[1], FB1[0] - FB0[0]);
+    palBm.visible = false;
+  }
+}
+
+semi.position.set(-250, 0, 127.5);
+
+resize();
+shade(0);
+animate();
+
+addEventListener('click', () => { t += 6 * DAY_LEN / 24; });
+
+if (_mq) _mq.addEventListener('change', e => {
+  DARK = _forced !== null ? _forced : e.matches;
+  location.reload();
+});
+</script>
+</body>
+</html>
